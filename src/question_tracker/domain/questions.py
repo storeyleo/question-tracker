@@ -19,6 +19,8 @@ class Question:
     parent_id: str | None
     local_label: str
     sort_order: int
+    note: str = ""
+    bookmarked: bool = False
 
 
 def validate_question_structure(questions: Iterable[Question]) -> None:
@@ -107,6 +109,44 @@ def leaf_questions_in_display_order(
     for root in children.get(None, []):
         visit(root)
     return tuple(leaves)
+
+
+def question_subtree_in_display_order(
+    question_id: str, questions: Iterable[Question]
+) -> tuple[Question, ...]:
+    items = tuple(questions)
+    by_id = _validated_index(items)
+    root = by_id.get(question_id)
+    if root is None:
+        raise QuestionStructureError(f"Unknown question ID: {question_id}")
+
+    children: dict[str, list[Question]] = defaultdict(list)
+    for question in items:
+        if question.parent_id is not None:
+            children[question.parent_id].append(question)
+    for siblings in children.values():
+        siblings.sort(key=lambda question: question.sort_order)
+
+    result: list[Question] = []
+
+    def visit(question: Question) -> None:
+        result.append(question)
+        for child in children.get(question.id, []):
+            visit(child)
+
+    visit(root)
+    return tuple(result)
+
+
+def leftmost_leaf(question_id: str, questions: Iterable[Question]) -> Question:
+    subtree = question_subtree_in_display_order(question_id, questions)
+    subtree_ids = {question.id for question in subtree}
+    parent_ids = {
+        question.parent_id
+        for question in subtree
+        if question.parent_id in subtree_ids
+    }
+    return next(question for question in subtree if question.id not in parent_ids)
 
 
 def _validated_index(questions: Iterable[Question]) -> dict[str, Question]:

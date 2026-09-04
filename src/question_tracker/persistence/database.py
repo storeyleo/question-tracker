@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import sqlite3
-from contextlib import closing
+from collections.abc import Iterator
+from contextlib import closing, contextmanager
 from pathlib import Path
 
 from question_tracker.persistence.migrations import apply_migrations
@@ -24,3 +25,18 @@ class Database:
             connection.execute("PRAGMA journal_mode = WAL")
             apply_migrations(connection)
 
+    @contextmanager
+    def read(self) -> Iterator[sqlite3.Connection]:
+        with closing(self.connect()) as connection:
+            yield connection
+
+    @contextmanager
+    def transaction(self) -> Iterator[sqlite3.Connection]:
+        with closing(self.connect()) as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                yield connection
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
