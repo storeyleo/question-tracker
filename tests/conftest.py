@@ -6,6 +6,7 @@ import pytest
 
 from question_tracker.paths import ApplicationPaths
 from question_tracker.application.tracking_service import TrackingService
+from question_tracker.application.library_service import LibraryService
 from question_tracker.persistence.database import Database
 
 
@@ -24,3 +25,11 @@ def database(application_paths: ApplicationPaths) -> Database:
 @pytest.fixture
 def tracking_service(database: Database) -> TrackingService:
     return TrackingService(database)
+
+
+@pytest.fixture
+def library_service(
+    database: Database, application_paths: ApplicationPaths
+) -> LibraryService:
+    application_paths.ensure_created()
+    return LibraryService(database, application_paths.managed_library_root)
