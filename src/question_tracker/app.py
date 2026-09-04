@@ -3,38 +3,24 @@ from __future__ import annotations
 import sys
 from collections.abc import Sequence
 
-from PySide6.QtCore import QCoreApplication, Qt
-from PySide6.QtWidgets import QApplication, QLabel, QMainWindow, QVBoxLayout, QWidget
+from PySide6.QtCore import QCoreApplication
+from PySide6.QtWidgets import QApplication, QMainWindow
 
 from question_tracker.application.library_service import LibraryService
+from question_tracker.application.tracking_service import TrackingService
 from question_tracker.paths import ApplicationPaths
 from question_tracker.persistence.database import Database
+from question_tracker.ui.home import HomeScreen
 
 
 class MainWindow(QMainWindow):
-    """Minimal application shell for the first milestone."""
+    """Application shell hosting the current Home screen."""
 
-    def __init__(self, paths: ApplicationPaths) -> None:
+    def __init__(self, paths: ApplicationPaths, tracking_service: TrackingService) -> None:
         super().__init__()
         self.setWindowTitle("Question Tracker")
         self.resize(900, 600)
-
-        heading = QLabel("Question Tracker")
-        heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        library_path = QLabel(f"Managed library: {paths.managed_library_root}")
-        library_path.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        library_path.setWordWrap(True)
-
-        layout = QVBoxLayout()
-        layout.addStretch()
-        layout.addWidget(heading)
-        layout.addWidget(library_path)
-        layout.addStretch()
-
-        home = QWidget()
-        home.setLayout(layout)
-        self.setCentralWidget(home)
+        self.setCentralWidget(HomeScreen(tracking_service, paths, self))
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -48,6 +34,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     database.initialize()
     LibraryService(database, paths.managed_library_root).scan_library()
 
-    window = MainWindow(paths)
+    tracking_service = TrackingService(database)
+    window = MainWindow(paths, tracking_service)
     window.show()
     return application.exec()

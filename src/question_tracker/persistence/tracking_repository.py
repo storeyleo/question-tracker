@@ -43,15 +43,29 @@ class TrackingRepository:
         row = self.connection.execute(
             "SELECT * FROM question_sets WHERE id = ?", (question_set_id,)
         ).fetchone()
-        if row is None:
-            return None
-        return QuestionSet(
-            id=row["id"],
-            kind=QuestionSetKind(row["kind"]),
-            display_name=row["display_name"],
-            setup_state=SetupState(row["setup_state"]),
-            general_note=row["general_note"],
-        )
+        return _question_set_from_row(row) if row is not None else None
+
+    def list_question_sets(
+        self, setup_state: SetupState | None = None
+    ) -> tuple[QuestionSet, ...]:
+        if setup_state is None:
+            rows = self.connection.execute(
+                """
+                SELECT * FROM question_sets
+                ORDER BY CASE setup_state WHEN 'needs_setup' THEN 0 ELSE 1 END,
+                         display_name COLLATE NOCASE, id
+                """
+            )
+        else:
+            rows = self.connection.execute(
+                """
+                SELECT * FROM question_sets
+                WHERE setup_state = ?
+                ORDER BY display_name COLLATE NOCASE, id
+                """,
+                (setup_state.value,),
+            )
+        return tuple(_question_set_from_row(row) for row in rows)
 
     def update_question_set_name(self, question_set_id: str, name: str, now: str) -> None:
         self.connection.execute(
@@ -183,6 +197,9 @@ class TrackingRepository:
         self.connection.execute(
             "UPDATE topics SET sort_order = ? WHERE id = ?", (sort_order, topic_id)
         )
+
+    def delete_topic(self, topic_id: str) -> None:
+        self.connection.execute("DELETE FROM topics WHERE id = ?", (topic_id,))
 
     def assign_topic(
         self, question_id: str, topic_id: str, question_set_id: str
@@ -333,6 +350,16 @@ def _question_from_row(row: sqlite3.Row) -> Question:
         sort_order=row["sort_order"],
         note=row["note"],
         bookmarked=bool(row["bookmarked"]),
+    )
+
+
+def _question_set_from_row(row: sqlite3.Row) -> QuestionSet:
+    return QuestionSet(
+        id=row["id"],
+        kind=QuestionSetKind(row["kind"]),
+        display_name=row["display_name"],
+        setup_state=SetupState(row["setup_state"]),
+        general_note=row["general_note"],
     )
 
 

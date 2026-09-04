@@ -75,6 +75,16 @@ def label_components(question_id: str, questions: Iterable[Question]) -> tuple[s
     )
 
 
+def visible_question_label(question_id: str, questions: Iterable[Question]) -> str:
+    components = label_components(question_id, questions)
+    if len(components) == 1:
+        return components[0]
+    label = f"{components[0]}.{components[1]}"
+    if len(components) == 3:
+        label = f"{label}){components[2]}"
+    return label
+
+
 def is_leaf(question_id: str, questions: Iterable[Question]) -> bool:
     items = tuple(questions)
     by_id = _validated_index(items)

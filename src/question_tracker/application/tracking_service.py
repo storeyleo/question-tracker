@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -72,6 +73,33 @@ class TrackingService:
     def get_question_set(self, question_set_id: str) -> QuestionSet:
         with self.database.read() as connection:
             return _require_question_set(TrackingRepository(connection), question_set_id)
+
+    def list_question_sets(
+        self, setup_state: SetupState | str | None = None
+    ) -> tuple[QuestionSet, ...]:
+        state = (
+            None
+            if setup_state is None
+            else _enum_value(SetupState, setup_state, "setup state")
+        )
+        with self.database.read() as connection:
+            return TrackingRepository(connection).list_question_sets(state)
+
+    def finish_question_set_setup(self, question_set_id: str) -> QuestionSet:
+        with self.database.transaction() as connection:
+            repository = TrackingRepository(connection)
+            _require_question_set(repository, question_set_id)
+            questions = repository.list_questions(question_set_id)
+            validate_question_structure(questions)
+            if not leaf_questions_in_display_order(questions, question_set_id):
+                raise ValidationError(
+                    "Setup requires at least one markable leaf question"
+                )
+            now = _time_text(_utc_now())
+            repository.update_question_set_state(
+                question_set_id, SetupState.READY, now
+            )
+            return _require_question_set(repository, question_set_id)
 
     def rename_question_set(self, question_set_id: str, display_name: str) -> QuestionSet:
         name = _required_text(display_name, "Display name")
@@ -380,6 +408,37 @@ class TrackingService:
                 now,
             )
 
+    def question_subtree_has_tracking_data(self, question_id: str) -> bool:
+        with self.database.read() as connection:
+            repository = TrackingRepository(connection)
+            question = _require_question(repository, question_id)
+            questions = repository.list_questions(question.question_set_id)
+            subtree = question_subtree_in_display_order(question.id, questions)
+            return any(
+                item.note
+                or item.bookmarked
+                or repository.topic_ids_for_question(item.id)
+                or repository.list_attempts_for_question(item.id)
+                for item in subtree
+            )
+
+    def compatible_history_targets(self, question_id: str) -> tuple[Question, ...]:
+        with self.database.read() as connection:
+            repository = TrackingRepository(connection)
+            question = _require_question(repository, question_id)
+            questions = repository.list_questions(question.question_set_id)
+            subtree_ids = {
+                item.id
+                for item in question_subtree_in_display_order(question.id, questions)
+            }
+            return tuple(
+                leaf
+                for leaf in leaf_questions_in_display_order(
+                    questions, question.question_set_id
+                )
+                if leaf.id not in subtree_ids
+            )
+
     def create_topic(self, question_set_id: str, title: str) -> Topic:
         clean_title = _required_text(title, "Topic title")
         with self.database.transaction() as connection:
@@ -392,7 +451,12 @@ class TrackingService:
                 title=clean_title,
                 sort_order=len(topics),
             )
-            repository.insert_topic(topic)
+            try:
+                repository.insert_topic(topic)
+            except sqlite3.IntegrityError as error:
+                raise ValidationError(
+                    "Topic titles must be unique within a question set"
+                ) from error
             return topic
 
     def rename_topic(self, topic_id: str, title: str) -> Topic:
@@ -400,7 +464,12 @@ class TrackingService:
         with self.database.transaction() as connection:
             repository = TrackingRepository(connection)
             _require_topic(repository, topic_id)
-            repository.update_topic_title(topic_id, clean_title)
+            try:
+                repository.update_topic_title(topic_id, clean_title)
+            except sqlite3.IntegrityError as error:
+                raise ValidationError(
+                    "Topic titles must be unique within a question set"
+                ) from error
             return _require_topic(repository, topic_id)
 
     def reorder_topic(self, topic_id: str, new_index: int) -> Topic:
@@ -420,6 +489,14 @@ class TrackingService:
             repository = TrackingRepository(connection)
             _require_question_set(repository, question_set_id)
             return repository.list_topics(question_set_id)
+
+    def delete_topic(self, topic_id: str) -> None:
+        with self.database.transaction() as connection:
+            repository = TrackingRepository(connection)
+            topic = _require_topic(repository, topic_id)
+            repository.delete_topic(topic.id)
+            remaining = list(repository.list_topics(topic.question_set_id))
+            _rewrite_topic_order(repository, remaining)
 
     def get_topic(self, topic_id: str) -> Topic:
         with self.database.read() as connection:
