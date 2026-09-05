@@ -39,6 +39,7 @@ from question_tracker.application.tracker_view import (
     ModuleTrackerSnapshot,
     QuestionColumn,
     TrackerSnapshot,
+    adjacent_leaf_id,
     build_module_tracker_snapshot,
 )
 from question_tracker.application.tracking_service import TrackingService
@@ -548,6 +549,7 @@ class TrackerScreen(QWidget):
         undo_stack: QUndoStack,
         *,
         on_back: Callable[[], None] | None = None,
+        on_open_marking: Callable[[str, str | None], None] | None = None,
         initial_question_set_id: str | None = None,
         parent: QWidget | None = None,
     ) -> None:
@@ -556,6 +558,7 @@ class TrackerScreen(QWidget):
         self.library_service = library_service
         self.undo_stack = undo_stack
         self.on_back = on_back
+        self.on_open_marking = on_open_marking
         self.current_question_set_id: str | None = None
         self.selected_question_id: str | None = None
         self.snapshot: TrackerSnapshot | None = None
@@ -661,6 +664,7 @@ class TrackerScreen(QWidget):
         self.open_marking_button = QPushButton("Open Marking")
         self.open_marking_button.setObjectName("openMarkingButton")
         self.open_marking_button.setEnabled(False)
+        self.open_marking_button.clicked.connect(self._open_marking)
         self.zoom_out_button = QPushButton("−")
         self.zoom_out_button.setObjectName("zoomOutButton")
         self.zoom_out_button.setToolTip("Zoom out")
@@ -795,19 +799,15 @@ class TrackerScreen(QWidget):
                     )
 
             reveal_selected()
-            QTimer.singleShot(0, reveal_selected)
+            QTimer.singleShot(0, self, reveal_selected)
         self.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def navigate(self, offset: int) -> None:
-        if self.snapshot is None or not self.snapshot.columns:
+        if self.snapshot is None:
             return
-        ids = [column.question.id for column in self.snapshot.columns]
-        if self.selected_question_id not in ids:
-            self.select_question(ids[0], reveal=True)
-            return
-        target = ids.index(self.selected_question_id) + offset
-        target = max(0, min(target, len(ids) - 1))
-        self.select_question(ids[target], reveal=True)
+        target = adjacent_leaf_id(self.snapshot, self.selected_question_id, offset)
+        if target is not None:
+            self.select_question(target, reveal=True)
 
     def navigate_vertical(self, offset: int) -> None:
         if self.module_snapshot is None or self.snapshot is None:
@@ -849,7 +849,7 @@ class TrackerScreen(QWidget):
             self.navigate(1)
 
     def keyPressEvent(self, event) -> None:
-        if _text_entry_has_focus():
+        if text_entry_has_focus():
             super().keyPressEvent(event)
             return
         if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
@@ -1068,7 +1068,7 @@ class TrackerScreen(QWidget):
             vertical.setValue(min(vertical_position, vertical.maximum()))
 
         restore()
-        QTimer.singleShot(0, restore)
+        QTimer.singleShot(0, self, restore)
 
     def _snapshot_for_question(
         self, question_id: str | None
@@ -1092,6 +1092,16 @@ class TrackerScreen(QWidget):
             button.setEnabled(enabled)
         self.bookmark_button.setEnabled(enabled)
         self.note_button.setEnabled(enabled)
+        self.open_marking_button.setEnabled(
+            enabled and self.on_open_marking is not None
+        )
+
+    def _open_marking(self) -> None:
+        if self.current_question_set_id is None or self.on_open_marking is None:
+            return
+        self.on_open_marking(
+            self.current_question_set_id, self.selected_question_id
+        )
 
     def _reorder_sheet(self, question_set_id: str, position: int) -> None:
         self.library_service.reorder_question_set(question_set_id, position)
@@ -1334,7 +1344,7 @@ class TrackerScreen(QWidget):
             self._shortcuts.append(shortcut)
 
     def _route_shortcut(self, action: Callable[[], None]) -> None:
-        if _text_entry_has_focus():
+        if text_entry_has_focus():
             return
         action()
 
@@ -1343,7 +1353,7 @@ class TrackerScreen(QWidget):
         self.refresh_current()
 
 
-def _text_entry_has_focus() -> bool:
+def text_entry_has_focus() -> bool:
     widget = QApplication.focusWidget()
     while widget is not None:
         if isinstance(

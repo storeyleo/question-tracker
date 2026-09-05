@@ -12,6 +12,7 @@ from question_tracker.application.tracking_service import TrackingService
 from question_tracker.paths import ApplicationPaths
 from question_tracker.persistence.database import Database
 from question_tracker.ui.home import HomeScreen
+from question_tracker.ui.marking import MarkingWorkspace
 from question_tracker.ui.tracker import TrackerScreen
 
 
@@ -42,6 +43,7 @@ class MainWindow(QMainWindow):
                 self.paths,
                 self,
                 open_tracker=self.show_tracker,
+                open_marking=self.show_marking,
                 library_service=self.library_service,
             )
         )
@@ -53,7 +55,25 @@ class MainWindow(QMainWindow):
                 self.library_service,
                 self.undo_stack,
                 on_back=self.show_home,
+                on_open_marking=self.show_marking,
                 initial_question_set_id=question_set_id,
+                parent=self,
+            )
+        )
+
+    def show_marking(
+        self,
+        question_set_id: str | None = None,
+        selected_question_id: str | None = None,
+    ) -> None:
+        self.setCentralWidget(
+            MarkingWorkspace(
+                self.tracking_service,
+                self.library_service,
+                self.undo_stack,
+                on_back=self.show_home,
+                initial_question_set_id=question_set_id,
+                initial_question_id=selected_question_id,
                 parent=self,
             )
         )

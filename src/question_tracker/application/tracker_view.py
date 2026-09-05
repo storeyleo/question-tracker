@@ -95,6 +95,19 @@ class ModuleTrackerSnapshot:
         return sum(snapshot.attempted_count for snapshot in self.question_sets)
 
 
+def adjacent_leaf_id(
+    snapshot: TrackerSnapshot, selected_question_id: str | None, offset: int
+) -> str | None:
+    """Move within one snapshot's visible leaves without wrapping."""
+    question_ids = [column.question.id for column in snapshot.columns]
+    if not question_ids:
+        return None
+    if selected_question_id not in question_ids:
+        return question_ids[0]
+    target = question_ids.index(selected_question_id) + offset
+    return question_ids[max(0, min(target, len(question_ids) - 1))]
+
+
 def build_tracker_snapshot(
     service: TrackingService, question_set_id: str
 ) -> TrackerSnapshot:

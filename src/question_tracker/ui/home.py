@@ -30,12 +30,14 @@ class HomeScreen(QWidget):
         parent: QWidget | None = None,
         *,
         open_tracker: Callable[[str], None] | None = None,
+        open_marking: Callable[[str | None], None] | None = None,
         library_service: LibraryService | None = None,
     ) -> None:
         super().__init__(parent)
         self.service = service
         self.paths = paths
         self.open_tracker = open_tracker
+        self.open_marking = open_marking
         self.library_service = library_service or LibraryService(
             service.database, paths.managed_library_root
         )
@@ -57,9 +59,15 @@ class HomeScreen(QWidget):
         self.refresh_button = QPushButton("Refresh")
         self.refresh_button.setObjectName("refreshHomeButton")
         self.refresh_button.clicked.connect(self.refresh)
+        self.marking_button = QPushButton("Marking")
+        self.marking_button.setObjectName("openMarkingFromHomeButton")
+        self.marking_button.setEnabled(open_marking is not None)
+        if open_marking is not None:
+            self.marking_button.clicked.connect(self.open_marking_workspace)
 
         button_row = QHBoxLayout()
         button_row.addWidget(self.open_button)
+        button_row.addWidget(self.marking_button)
         button_row.addWidget(self.refresh_button)
         button_row.addStretch()
 
@@ -109,6 +117,10 @@ class HomeScreen(QWidget):
         editor = QuestionEditorDialog(self.service, question_set_id, self)
         editor.exec()
         self.refresh()
+
+    def open_marking_workspace(self) -> None:
+        if self.open_marking is not None:
+            self.open_marking(self._selected_question_set_id())
 
     def _open_item(self, item: QListWidgetItem) -> None:
         self.question_set_list.setCurrentItem(item)

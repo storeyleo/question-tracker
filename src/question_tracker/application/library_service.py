@@ -240,6 +240,11 @@ class LibraryService:
         with self.database.read() as connection:
             return LibraryRepository(connection).list_files()
 
+    def path_for_file(self, file_id: str) -> Path:
+        """Return a managed file's validated path, whether present or missing."""
+        managed_file = self.get_file(file_id)
+        return self._path_from_relative(managed_file.relative_path)
+
     def module_for_question_set(
         self, question_set_id: str
     ) -> LibraryModule | None:
