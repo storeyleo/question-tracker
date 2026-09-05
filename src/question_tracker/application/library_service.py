@@ -176,9 +176,12 @@ class LibraryService:
         year_name: str,
         module_name: str,
         document_type: DocumentType | str,
+        *,
+        destination_name: str | None = None,
     ) -> ManagedFile:
         source = _validate_pdf_source(source_path)
         kind = _document_type(document_type)
+        filename = _validate_pdf_filename(destination_name or source.name)
         year, module, module_path = self._require_module(year_name, module_name)
         category = CATEGORY_FOR_DOCUMENT_TYPE[kind]
         category_path = self._safe_path(year, module, category)
@@ -186,10 +189,10 @@ class LibraryService:
             category_path.mkdir(exist_ok=True)
         except OSError as error:
             raise LibraryError(f"Could not create category folder: {category}") from error
-        destination = self._safe_path(year, module, category, source.name)
+        destination = self._safe_path(year, module, category, filename)
         if destination.exists():
             raise DestinationConflictError(
-                f"A file named {source.name!r} already exists in {module_path.name}"
+                f"A file named {filename!r} already exists in {module_path.name}"
             )
 
         _copy_new_file(source, destination)
@@ -239,6 +242,20 @@ class LibraryService:
     def list_files(self) -> tuple[ManagedFile, ...]:
         with self.database.read() as connection:
             return LibraryRepository(connection).list_files()
+
+    def list_folders(self) -> tuple[PurePosixPath, ...]:
+        """List current managed-library folders as paths relative to the root."""
+        self.root.mkdir(parents=True, exist_ok=True)
+        folders: list[PurePosixPath] = []
+        try:
+            for path in self.root.rglob("*"):
+                if not path.is_dir():
+                    continue
+                self._ensure_inside_root(path)
+                folders.append(PurePosixPath(path.relative_to(self.root).as_posix()))
+        except OSError as error:
+            raise LibraryError("Could not list the managed-library folders") from error
+        return tuple(sorted(folders, key=lambda item: item.as_posix().casefold()))
 
     def path_for_file(self, file_id: str) -> Path:
         """Return a managed file's validated path, whether present or missing."""
@@ -590,6 +607,16 @@ def _validate_pdf_source(source_path: Path) -> Path:
     if b"%PDF-" not in header:
         raise InvalidSourceError("Source file does not contain a PDF header")
     return source
+
+
+def _validate_pdf_filename(value: str) -> str:
+    try:
+        filename = _validate_folder_name(value)
+    except InvalidFolderNameError as error:
+        raise InvalidTargetError(f"Invalid destination filename: {value!r}") from error
+    if Path(filename).suffix.casefold() != ".pdf":
+        raise InvalidTargetError("Destination filename must have a .pdf extension")
+    return filename
 
 
 def _document_type(value: DocumentType | str) -> DocumentType:

@@ -1,27 +1,96 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QDialog,
+    QFileDialog,
+    QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
     QPushButton,
+    QScrollArea,
+    QSplitter,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
-from question_tracker.application.library_service import LibraryService
+from question_tracker.application.home_view import (
+    HomeSnapshot,
+    ModuleSummary,
+    build_home_snapshot,
+)
+from question_tracker.application.library_service import LibraryError, LibraryService
 from question_tracker.application.tracking_service import TrackingService
-from question_tracker.domain.tracking import SetupState
+from question_tracker.domain.library import (
+    DocumentType,
+    FileAvailability,
+    FileRole,
+    ManagedFile,
+)
+from question_tracker.domain.tracking import QuestionSet, SetupState
 from question_tracker.paths import ApplicationPaths
+from question_tracker.ui.import_dialog import ImportPdfDialog
+from question_tracker.ui.pdf_pane import ManagedPdfBrowser
 from question_tracker.ui.question_editor import QuestionEditorDialog
 
 
+class ModuleCard(QPushButton):
+    """Compact clickable summary for one managed-library module."""
+
+    def __init__(
+        self,
+        summary: ModuleSummary,
+        open_tracker: Callable[[str], None] | None,
+        parent: QWidget | None = None,
+    ) -> None:
+        sheets = summary.problem_sheets
+        papers = summary.past_papers
+        text = (
+            f"{summary.module.module_name}\n"
+            f"{summary.module.year_name}\n\n"
+            f"Problem Sheets: {sheets.complete} / {sheets.total} attempted"
+            f"  ({sheets.mastered} mastered)\n"
+            f"Past Papers: {papers.complete} / {papers.total} attempted"
+            f"  ({papers.mastered} mastered)"
+        )
+        if summary.needs_setup_count:
+            text += f"\nNeeds setup: {summary.needs_setup_count}"
+        super().__init__(text, parent)
+        self.summary = summary
+        self.setObjectName("moduleCard")
+        self.setProperty("yearName", summary.module.year_name)
+        self.setProperty("moduleName", summary.module.module_name)
+        self.setMinimumSize(270, 135)
+        self.setMaximumWidth(330)
+        self.setToolTip(
+            "Open this module in Question Tracker"
+            if summary.first_ready_question_set_id is not None
+            else "Set up at least one question set to open this module in Tracker"
+        )
+        enabled = (
+            open_tracker is not None
+            and summary.first_ready_question_set_id is not None
+        )
+        self.setEnabled(enabled)
+        if enabled:
+            self.clicked.connect(
+                lambda checked=False: open_tracker(
+                    summary.first_ready_question_set_id
+                )
+            )
+
+
 class HomeScreen(QWidget):
-    """Small home screen for finding question sets that need setup."""
+    """Home dashboard for module progress and managed-library organisation."""
 
     def __init__(
         self,
@@ -31,6 +100,7 @@ class HomeScreen(QWidget):
         *,
         open_tracker: Callable[[str], None] | None = None,
         open_marking: Callable[[str | None], None] | None = None,
+        open_file_marking: Callable[[str], None] | None = None,
         library_service: LibraryService | None = None,
     ) -> None:
         super().__init__(parent)
@@ -38,70 +108,191 @@ class HomeScreen(QWidget):
         self.paths = paths
         self.open_tracker = open_tracker
         self.open_marking = open_marking
+        self.open_file_marking = open_file_marking
         self.library_service = library_service or LibraryService(
             service.database, paths.managed_library_root
         )
+        self.snapshot = HomeSnapshot((), (), ())
+        self.module_cards: dict[tuple[str, str], ModuleCard] = {}
 
         heading = QLabel("Question Tracker")
         heading.setObjectName("homeHeading")
         heading.setStyleSheet("font-size: 22px; font-weight: bold;")
+        self.generic_marking_button = QPushButton("Open Marking")
+        self.generic_marking_button.setObjectName("openGenericMarkingButton")
+        self.generic_marking_button.setEnabled(open_marking is not None)
+        if open_marking is not None:
+            self.generic_marking_button.clicked.connect(
+                lambda checked=False: open_marking(None)
+            )
+        self.refresh_button = QPushButton("Refresh Library")
+        self.refresh_button.setObjectName("refreshHomeButton")
+        self.refresh_button.clicked.connect(self.refresh)
+        header = QHBoxLayout()
+        header.addWidget(heading)
+        header.addStretch()
+        header.addWidget(self.generic_marking_button)
+        header.addWidget(self.refresh_button)
 
         library_path = QLabel(f"Managed library: {paths.managed_library_root}")
         library_path.setWordWrap(True)
 
+        self.module_container = QWidget()
+        self.module_card_layout = QHBoxLayout(self.module_container)
+        self.module_card_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.module_scroll = QScrollArea()
+        self.module_scroll.setObjectName("moduleCardScroll")
+        self.module_scroll.setWidgetResizable(True)
+        self.module_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self.module_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.module_scroll.setWidget(self.module_container)
+        self.module_scroll.setMinimumHeight(170)
+
+        self.library_browser = ManagedPdfBrowser(self.library_service)
+        self.library_browser.setObjectName("homeLibraryBrowser")
+        self.library_browser.currentItemChanged.connect(
+            self._browser_selection_changed
+        )
+        self.library_browser.file_activated.connect(self._open_browser_file_marking)
+        self.selected_file_label = QLabel("Select a managed PDF")
+        self.selected_file_label.setObjectName("homeSelectedFileLabel")
+        self.selected_file_label.setWordWrap(True)
+        self.quick_tracker_button = QPushButton("Open Question Tracker")
+        self.quick_tracker_button.setObjectName("homeBrowserTrackerButton")
+        self.quick_tracker_button.clicked.connect(self._open_browser_file_tracker)
+        self.quick_marking_button = QPushButton("Open Marking")
+        self.quick_marking_button.setObjectName("homeBrowserMarkingButton")
+        self.quick_marking_button.clicked.connect(
+            lambda checked=False: self._open_browser_file_marking()
+        )
+        self.quick_setup_button = QPushButton("Set Up / Edit Questions")
+        self.quick_setup_button.setObjectName("homeBrowserSetupButton")
+        self.quick_setup_button.clicked.connect(self._edit_browser_question_set)
+        self.quick_replace_button = QPushButton("Replace PDF...")
+        self.quick_replace_button.setObjectName("homeBrowserReplaceButton")
+        self.quick_replace_button.clicked.connect(self._replace_browser_file)
+        browser_actions = QHBoxLayout()
+        for button in (
+            self.quick_tracker_button,
+            self.quick_marking_button,
+            self.quick_setup_button,
+            self.quick_replace_button,
+        ):
+            browser_actions.addWidget(button)
+        browser_actions.addStretch()
+        browser_group = QGroupBox("Managed library")
+        browser_layout = QVBoxLayout(browser_group)
+        browser_layout.addWidget(self.library_browser)
+        browser_layout.addWidget(self.selected_file_label)
+        browser_layout.addLayout(browser_actions)
+
+        self.needs_setup_tree = QTreeWidget()
+        self.needs_setup_tree.setObjectName("needsSetupTree")
+        self.needs_setup_tree.setColumnCount(5)
+        self.needs_setup_tree.setHeaderLabels(
+            ("Year", "Module", "Document", "Type / status", "")
+        )
+        needs_group = QGroupBox("Needs Setup")
+        needs_layout = QVBoxLayout(needs_group)
+        needs_layout.addWidget(self.needs_setup_tree)
+
+        # Keep the existing all-set selector as a compact navigation convenience.
         self.question_set_list = QListWidget()
         self.question_set_list.setObjectName("questionSetList")
+        self.question_set_list.setMaximumHeight(115)
         self.question_set_list.itemDoubleClicked.connect(self._open_item)
-
-        self.open_button = QPushButton("Open")
+        self.open_button = QPushButton("Open selected")
         self.open_button.setObjectName("openQuestionSetButton")
         self.open_button.clicked.connect(self.open_selected_question_set)
-        self.refresh_button = QPushButton("Refresh")
-        self.refresh_button.setObjectName("refreshHomeButton")
-        self.refresh_button.clicked.connect(self.refresh)
-        self.marking_button = QPushButton("Marking")
+        self.marking_button = QPushButton("Mark selected")
         self.marking_button.setObjectName("openMarkingFromHomeButton")
         self.marking_button.setEnabled(open_marking is not None)
         if open_marking is not None:
             self.marking_button.clicked.connect(self.open_marking_workspace)
+        all_sets_group = QGroupBox("All question sets")
+        all_sets_layout = QVBoxLayout(all_sets_group)
+        all_sets_layout.addWidget(self.question_set_list)
+        all_sets_actions = QHBoxLayout()
+        all_sets_actions.addWidget(self.open_button)
+        all_sets_actions.addWidget(self.marking_button)
+        all_sets_actions.addStretch()
+        all_sets_layout.addLayout(all_sets_actions)
 
-        button_row = QHBoxLayout()
-        button_row.addWidget(self.open_button)
-        button_row.addWidget(self.marking_button)
-        button_row.addWidget(self.refresh_button)
-        button_row.addStretch()
+        right_column = QWidget()
+        right_layout = QVBoxLayout(right_column)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.addWidget(needs_group, 2)
+        right_layout.addWidget(all_sets_group, 1)
+        content_splitter = QSplitter(Qt.Orientation.Horizontal)
+        content_splitter.setObjectName("homeContentSplitter")
+        content_splitter.addWidget(browser_group)
+        content_splitter.addWidget(right_column)
+        content_splitter.setSizes((700, 400))
+
+        self.add_problem_sheet_button = QPushButton("Add Problem Sheet")
+        self.add_problem_sheet_button.setObjectName("addProblemSheetButton")
+        self.add_problem_sheet_button.clicked.connect(
+            lambda: self._open_import_dialog(DocumentType.PROBLEM_SHEET)
+        )
+        self.add_solution_button = QPushButton("Add Solution")
+        self.add_solution_button.setObjectName("addSolutionButton")
+        self.add_solution_button.clicked.connect(
+            lambda: self._open_import_dialog(DocumentType.SOLUTION)
+        )
+        self.add_past_paper_button = QPushButton("Add Past Paper")
+        self.add_past_paper_button.setObjectName("addPastPaperButton")
+        self.add_past_paper_button.clicked.connect(
+            lambda: self._open_import_dialog(DocumentType.PAST_PAPER)
+        )
+        self.create_year_button = QPushButton("Create Year...")
+        self.create_year_button.setObjectName("createYearButton")
+        self.create_year_button.clicked.connect(self._create_year)
+        self.create_module_button = QPushButton("Create Module...")
+        self.create_module_button.setObjectName("createModuleButton")
+        self.create_module_button.clicked.connect(self._create_module)
+        import_actions = QHBoxLayout()
+        for button in (
+            self.add_problem_sheet_button,
+            self.add_solution_button,
+            self.add_past_paper_button,
+            self.create_year_button,
+            self.create_module_button,
+        ):
+            import_actions.addWidget(button)
+        import_actions.addStretch()
+        import_group = QGroupBox("Add to managed library")
+        import_layout = QVBoxLayout(import_group)
+        import_layout.addLayout(import_actions)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(heading)
+        layout.addLayout(header)
         layout.addWidget(library_path)
-        layout.addWidget(QLabel("Question sets"))
-        layout.addWidget(self.question_set_list)
-        layout.addLayout(button_row)
+        layout.addWidget(QLabel("Modules"))
+        layout.addWidget(self.module_scroll)
+        layout.addWidget(content_splitter, 1)
+        layout.addWidget(import_group)
 
         self.refresh()
 
     def refresh(self) -> None:
-        self.library_service.refresh()
         selected_id = self._selected_question_set_id()
-        self.question_set_list.clear()
-        selected_item: QListWidgetItem | None = None
-        for question_set in self.service.list_question_sets():
-            state = (
-                "Needs setup"
-                if question_set.setup_state.value == "needs_setup"
-                else "Ready"
-            )
-            kind = question_set.kind.value.replace("_", " ").title()
-            item = QListWidgetItem(f"{question_set.display_name} — {kind} — {state}")
-            item.setData(Qt.ItemDataRole.UserRole, question_set.id)
-            self.question_set_list.addItem(item)
-            if question_set.id == selected_id:
-                selected_item = item
-        if selected_item is not None:
-            self.question_set_list.setCurrentItem(selected_item)
-        elif self.question_set_list.count():
-            self.question_set_list.setCurrentRow(0)
-        self.open_button.setEnabled(self.question_set_list.count() > 0)
+        scan_result = self.library_service.refresh()
+        self.snapshot = build_home_snapshot(
+            self.service, self.library_service, scan_result
+        )
+        self._populate_module_cards()
+        self.library_browser.populate(
+            years=self.snapshot.years,
+            modules=(summary.module for summary in self.snapshot.modules),
+            folders=self.library_service.list_folders(),
+        )
+        self._populate_needs_setup()
+        self._populate_question_sets(selected_id)
+        self._browser_selection_changed(self.library_browser.currentItem(), None)
 
     def open_selected_question_set(self) -> None:
         question_set_id = self._selected_question_set_id()
@@ -114,13 +305,222 @@ class HomeScreen(QWidget):
         ):
             self.open_tracker(question_set_id)
             return
-        editor = QuestionEditorDialog(self.service, question_set_id, self)
-        editor.exec()
-        self.refresh()
+        self._edit_question_set(question_set_id)
 
     def open_marking_workspace(self) -> None:
         if self.open_marking is not None:
             self.open_marking(self._selected_question_set_id())
+
+    def _populate_module_cards(self) -> None:
+        while self.module_card_layout.count():
+            item = self.module_card_layout.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+        self.module_cards = {}
+        for summary in self.snapshot.modules:
+            card = ModuleCard(summary, self.open_tracker)
+            key = (summary.module.year_name, summary.module.module_name)
+            self.module_cards[key] = card
+            self.module_card_layout.addWidget(card)
+        self.module_container.setMinimumWidth(len(self.module_cards) * 286)
+
+    def _populate_needs_setup(self) -> None:
+        self.needs_setup_tree.clear()
+        for setup_item in self.snapshot.needs_setup:
+            question_set = setup_item.question_set
+            kind = question_set.kind.value.replace("_", " ").title()
+            status = f"{kind} — {'Missing' if setup_item.is_missing else 'Needs setup'}"
+            item = QTreeWidgetItem(
+                [
+                    setup_item.module.year_name,
+                    setup_item.module.module_name,
+                    question_set.display_name,
+                    status,
+                    "",
+                ]
+            )
+            item.setData(0, Qt.ItemDataRole.UserRole, question_set.id)
+            self.needs_setup_tree.addTopLevelItem(item)
+            button = QPushButton("Set Up")
+            button.setObjectName(f"setupQuestionSet-{question_set.id}")
+            button.setProperty("questionSetId", question_set.id)
+            button.clicked.connect(
+                lambda checked=False, question_set_id=question_set.id: (
+                    self._edit_question_set(question_set_id)
+                )
+            )
+            self.needs_setup_tree.setItemWidget(item, 4, button)
+        self.needs_setup_tree.resizeColumnToContents(0)
+        self.needs_setup_tree.resizeColumnToContents(1)
+        self.needs_setup_tree.resizeColumnToContents(3)
+
+    def _populate_question_sets(self, selected_id: str | None) -> None:
+        self.question_set_list.clear()
+        selected_item: QListWidgetItem | None = None
+        for question_set in self.service.list_question_sets():
+            module = self.library_service.module_for_question_set(question_set.id)
+            context = (
+                f"{module.year_name} / {module.module_name} / "
+                if module is not None
+                else ""
+            )
+            state = (
+                "Needs setup"
+                if question_set.setup_state is SetupState.NEEDS_SETUP
+                else "Ready"
+            )
+            kind = question_set.kind.value.replace("_", " ").title()
+            main_files = self.library_service.files_for_question_set(
+                question_set.id, FileRole.MAIN
+            )
+            missing = (
+                " — Missing"
+                if main_files
+                and main_files[0].availability is FileAvailability.MISSING
+                else ""
+            )
+            item = QListWidgetItem(
+                f"{context}{question_set.display_name} — {kind} — {state}{missing}"
+            )
+            item.setData(Qt.ItemDataRole.UserRole, question_set.id)
+            self.question_set_list.addItem(item)
+            if question_set.id == selected_id:
+                selected_item = item
+        if selected_item is not None:
+            self.question_set_list.setCurrentItem(selected_item)
+        elif self.question_set_list.count():
+            self.question_set_list.setCurrentRow(0)
+        enabled = self.question_set_list.count() > 0
+        self.open_button.setEnabled(enabled)
+        self.marking_button.setEnabled(enabled and self.open_marking is not None)
+
+    def _browser_selection_changed(
+        self, current: QTreeWidgetItem | None, previous: QTreeWidgetItem | None
+    ) -> None:
+        del current, previous
+        managed_file = self._selected_managed_file()
+        question_set = self._question_set_for_file(managed_file)
+        self.quick_tracker_button.setEnabled(
+            question_set is not None
+            and question_set.setup_state is SetupState.READY
+            and self.open_tracker is not None
+        )
+        self.quick_setup_button.setEnabled(question_set is not None)
+        self.quick_marking_button.setEnabled(
+            managed_file is not None
+            and (
+                (question_set is not None and self.open_marking is not None)
+                or (question_set is None and self.open_file_marking is not None)
+            )
+        )
+        self.quick_replace_button.setEnabled(managed_file is not None)
+        if managed_file is None:
+            self.selected_file_label.setText("Select a managed PDF")
+            return
+        status = (
+            "Missing"
+            if managed_file.availability is FileAvailability.MISSING
+            else "Present"
+        )
+        self.selected_file_label.setText(
+            f"{managed_file.relative_path.as_posix()} — {status}"
+        )
+        self.quick_setup_button.setText(
+            "Set Up"
+            if question_set is not None
+            and question_set.setup_state is SetupState.NEEDS_SETUP
+            else "Edit Questions"
+        )
+
+    def _open_browser_file_tracker(self) -> None:
+        question_set = self._question_set_for_file(self._selected_managed_file())
+        if (
+            question_set is not None
+            and question_set.setup_state is SetupState.READY
+            and self.open_tracker is not None
+        ):
+            self.open_tracker(question_set.id)
+
+    def _open_browser_file_marking(self, file_id: str | None = None) -> None:
+        managed_file = (
+            self.library_service.get_file(file_id)
+            if file_id is not None
+            else self._selected_managed_file()
+        )
+        if managed_file is None:
+            return
+        question_set = self._question_set_for_file(managed_file)
+        if question_set is not None and self.open_marking is not None:
+            self.open_marking(question_set.id)
+        elif self.open_file_marking is not None:
+            self.open_file_marking(managed_file.id)
+
+    def _edit_browser_question_set(self) -> None:
+        question_set = self._question_set_for_file(self._selected_managed_file())
+        if question_set is not None:
+            self._edit_question_set(question_set.id)
+
+    def _replace_browser_file(self) -> None:
+        managed_file = self._selected_managed_file()
+        if managed_file is None:
+            return
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Replace managed PDF", "", "PDF files (*.pdf)"
+        )
+        if not filename:
+            return
+        try:
+            self.library_service.replace_file(managed_file.id, Path(filename))
+        except LibraryError as error:
+            QMessageBox.warning(self, "Replace PDF", str(error))
+            return
+        self.refresh()
+
+    def _open_import_dialog(self, document_type: DocumentType) -> None:
+        dialog = ImportPdfDialog(self.library_service, document_type, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.refresh()
+
+    def _create_year(self) -> None:
+        name, accepted = QInputDialog.getText(self, "Create Year", "Year name")
+        if not accepted:
+            return
+        try:
+            self.library_service.create_year(name)
+        except LibraryError as error:
+            QMessageBox.warning(self, "Create Year", str(error))
+            return
+        self.refresh()
+
+    def _create_module(self) -> None:
+        if not self.snapshot.years:
+            QMessageBox.warning(self, "Create Module", "Create a Year first.")
+            return
+        year, accepted = QInputDialog.getItem(
+            self,
+            "Create Module",
+            "Year",
+            self.snapshot.years,
+            editable=False,
+        )
+        if not accepted:
+            return
+        name, accepted = QInputDialog.getText(
+            self, "Create Module", "Module name"
+        )
+        if not accepted:
+            return
+        try:
+            self.library_service.create_module(year, name)
+        except LibraryError as error:
+            QMessageBox.warning(self, "Create Module", str(error))
+            return
+        self.refresh()
+
+    def _edit_question_set(self, question_set_id: str) -> None:
+        editor = QuestionEditorDialog(self.service, question_set_id, self)
+        editor.exec()
+        self.refresh()
 
     def _open_item(self, item: QListWidgetItem) -> None:
         self.question_set_list.setCurrentItem(item)
@@ -131,3 +531,17 @@ class HomeScreen(QWidget):
         if item is None:
             return None
         return str(item.data(Qt.ItemDataRole.UserRole))
+
+    def _selected_managed_file(self) -> ManagedFile | None:
+        file_id = self.library_browser.selected_file_id()
+        return self.library_service.get_file(file_id) if file_id is not None else None
+
+    def _question_set_for_file(
+        self, managed_file: ManagedFile | None
+    ) -> QuestionSet | None:
+        if managed_file is None:
+            return None
+        question_sets = self.library_service.question_sets_for_file(
+            managed_file.id, FileRole.MAIN
+        )
+        return question_sets[0] if question_sets else None

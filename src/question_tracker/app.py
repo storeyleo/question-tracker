@@ -44,6 +44,7 @@ class MainWindow(QMainWindow):
                 self,
                 open_tracker=self.show_tracker,
                 open_marking=self.show_marking,
+                open_file_marking=self.show_file_in_marking,
                 library_service=self.library_service,
             )
         )
@@ -57,6 +58,18 @@ class MainWindow(QMainWindow):
                 on_back=self.show_home,
                 on_open_marking=self.show_marking,
                 initial_question_set_id=question_set_id,
+                parent=self,
+            )
+        )
+
+    def show_file_in_marking(self, file_id: str) -> None:
+        self.setCentralWidget(
+            MarkingWorkspace(
+                self.tracking_service,
+                self.library_service,
+                self.undo_stack,
+                on_back=self.show_home,
+                initial_file_id=file_id,
                 parent=self,
             )
         )

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from PySide6.QtCore import QEvent, QObject, QPointF, Qt, Signal
 from PySide6.QtPdf import QPdfDocument, QPdfSearchModel
@@ -27,7 +27,12 @@ from PySide6.QtWidgets import (
 )
 
 from question_tracker.application.library_service import LibraryError, LibraryService
-from question_tracker.domain.library import FileAvailability, LibraryModule, ManagedFile
+from question_tracker.domain.library import (
+    FileAvailability,
+    LibraryModule,
+    ManagedFile,
+    STANDARD_CATEGORY_FOLDERS,
+)
 
 
 PDF_ERROR_MESSAGES = {
@@ -53,6 +58,8 @@ class ManagedPdfBrowser(QTreeWidget):
         super().__init__(parent)
         self.library_service = library_service
         self._folder_items: dict[tuple[str, ...], QTreeWidgetItem] = {}
+        self._file_items: dict[str, QTreeWidgetItem] = {}
+        self._path_items: dict[tuple[str, ...], QTreeWidgetItem] = {}
         self.setColumnCount(2)
         self.setHeaderLabels(("Managed PDFs", ""))
         self.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
@@ -67,11 +74,59 @@ class ManagedPdfBrowser(QTreeWidget):
         *,
         focus_module: LibraryModule | None = None,
         highlighted_file_ids: Iterable[str] = (),
+        years: Iterable[str] = (),
+        modules: Iterable[LibraryModule] = (),
+        folders: Iterable[PurePosixPath] = (),
     ) -> None:
         highlighted = set(highlighted_file_ids)
+        expanded_paths = {
+            path for path, item in self._folder_items.items() if item.isExpanded()
+        }
+        current_item = self.currentItem()
+        selected_path = (
+            None
+            if current_item is None
+            else _item_relative_path(current_item, self.FOLDER_PATH_ROLE)
+        )
         self.clear()
         self._folder_items = {}
-        module_item: QTreeWidgetItem | None = None
+        self._file_items = {}
+        self._path_items = {}
+
+        def ensure_folder(parts: tuple[str, ...]) -> QTreeWidgetItem:
+            existing = self._folder_items.get(parts)
+            if existing is not None:
+                return existing
+            parent = ensure_folder(parts[:-1]) if len(parts) > 1 else None
+            item = QTreeWidgetItem([parts[-1], "Expand all"])
+            item.setData(0, self.FOLDER_PATH_ROLE, "/".join(parts))
+            item.setToolTip(1, f"Expand everything under {parts[-1]}")
+            self._folder_items[parts] = item
+            self._path_items[parts] = item
+            if parent is None:
+                self.addTopLevelItem(item)
+            else:
+                parent.addChild(item)
+            return item
+
+        for year_name in sorted(set(years), key=str.casefold):
+            ensure_folder((year_name,))
+        for module in sorted(
+            set(modules),
+            key=lambda item: (
+                item.year_name.casefold(),
+                item.module_name.casefold(),
+            ),
+        ):
+            ensure_folder((module.year_name, module.module_name))
+            for category in STANDARD_CATEGORY_FOLDERS:
+                ensure_folder((module.year_name, module.module_name, category))
+        for folder in sorted(
+            set(folders), key=lambda item: item.as_posix().casefold()
+        ):
+            if folder.parts:
+                ensure_folder(folder.parts)
+
         for managed_file in sorted(
             self.library_service.list_files(),
             key=lambda item: item.relative_path.as_posix().casefold(),
@@ -79,28 +134,7 @@ class ManagedPdfBrowser(QTreeWidget):
             parts = managed_file.relative_path.parts
             if len(parts) < 4:
                 continue
-            parent: QTreeWidgetItem | None = None
-            for depth, part in enumerate(parts[:-1], start=1):
-                key = parts[:depth]
-                item = self._folder_items.get(key)
-                if item is None:
-                    item = QTreeWidgetItem([part, "Expand all"])
-                    item.setData(0, self.FOLDER_PATH_ROLE, "/".join(key))
-                    item.setToolTip(1, f"Expand everything under {part}")
-                    self._folder_items[key] = item
-                    if parent is None:
-                        self.addTopLevelItem(item)
-                    else:
-                        parent.addChild(item)
-                parent = item
-                if (
-                    focus_module is not None
-                    and key
-                    == (focus_module.year_name, focus_module.module_name)
-                ):
-                    module_item = item
-
-            assert parent is not None
+            parent = ensure_folder(parts[:-1])
             label = parts[-1]
             if managed_file.id in highlighted:
                 label = f"Associated — {label}"
@@ -108,14 +142,31 @@ class ManagedPdfBrowser(QTreeWidget):
                 label = f"{label} [Missing]"
             file_item = QTreeWidgetItem([label])
             file_item.setData(0, self.FILE_ID_ROLE, managed_file.id)
+            file_item.setData(
+                0, self.FOLDER_PATH_ROLE, managed_file.relative_path.as_posix()
+            )
             file_item.setToolTip(0, managed_file.relative_path.as_posix())
             parent.addChild(file_item)
+            self._file_items[managed_file.id] = file_item
+            self._path_items[parts] = file_item
             if managed_file.id in highlighted:
                 highlighted_parent = parent
                 while highlighted_parent is not None:
                     highlighted_parent.setExpanded(True)
                     highlighted_parent = highlighted_parent.parent()
 
+        for path in expanded_paths:
+            item = self._folder_items.get(path)
+            if item is not None:
+                item.setExpanded(True)
+
+        module_item = (
+            None
+            if focus_module is None
+            else self._folder_items.get(
+                (focus_module.year_name, focus_module.module_name)
+            )
+        )
         if module_item is not None:
             parent = module_item
             while parent is not None:
@@ -123,10 +174,20 @@ class ManagedPdfBrowser(QTreeWidget):
                 parent = parent.parent()
             for index in range(module_item.childCount()):
                 module_item.child(index).setExpanded(True)
+
+        selected_item = (
+            None if selected_path is None else self._path_items.get(selected_path)
+        )
+        if selected_item is not None:
+            self.setCurrentItem(selected_item)
+        elif module_item is not None:
             self.setCurrentItem(module_item)
 
     def folder_item(self, parts: tuple[str, ...]) -> QTreeWidgetItem | None:
         return self._folder_items.get(parts)
+
+    def file_item(self, file_id: str) -> QTreeWidgetItem | None:
+        return self._file_items.get(file_id)
 
     def expand_descendants(self, item: QTreeWidgetItem) -> None:
         """Expand one folder branch without changing unrelated branches."""
@@ -152,6 +213,15 @@ class ManagedPdfBrowser(QTreeWidget):
     def _item_clicked(self, item: QTreeWidgetItem, column: int) -> None:
         if column == 1 and item.data(0, self.FILE_ID_ROLE) is None:
             self.expand_descendants(item)
+
+
+def _item_relative_path(
+    item: QTreeWidgetItem, path_role: int
+) -> tuple[str, ...] | None:
+    value = item.data(0, path_role)
+    if not isinstance(value, str) or not value:
+        return None
+    return PurePosixPath(value).parts
 
 
 class PdfPane(QWidget):

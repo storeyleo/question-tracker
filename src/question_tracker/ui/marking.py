@@ -27,7 +27,7 @@ from question_tracker.application.tracker_view import (
     build_tracker_snapshot,
 )
 from question_tracker.application.tracking_service import TrackingService
-from question_tracker.domain.library import FileRole
+from question_tracker.domain.library import DocumentType, FileRole, LibraryModule
 from question_tracker.domain.tracking import AttemptStatus, SetupState
 from question_tracker.ui.colours import contrasting_text_colour
 from question_tracker.ui.pdf_pane import PdfPane
@@ -508,6 +508,7 @@ class MarkingWorkspace(QWidget):
         on_back: Callable[[], None] | None = None,
         initial_question_set_id: str | None = None,
         initial_question_id: str | None = None,
+        initial_file_id: str | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -582,6 +583,8 @@ class MarkingWorkspace(QWidget):
             self._load_question_set_context(
                 initial_question_set_id, initial_question_id
             )
+        elif initial_file_id is not None:
+            self._load_file_context(initial_file_id)
 
     def _load_question_set_context(
         self, question_set_id: str, selected_question_id: str | None
@@ -610,6 +613,25 @@ class MarkingWorkspace(QWidget):
             self.left_pane.open_managed_file(main_files[0].id)
         if len(reference_files) == 1:
             self.right_pane.open_managed_file(reference_files[0].id)
+
+    def _load_file_context(self, file_id: str) -> None:
+        managed_file = self.library_service.get_file(file_id)
+        parts = managed_file.relative_path.parts
+        module = (
+            LibraryModule(parts[0], parts[1]) if len(parts) >= 2 else None
+        )
+        self.left_pane.refresh_browser(
+            focus_module=module, highlighted_file_ids=(file_id,)
+        )
+        self.right_pane.refresh_browser(
+            focus_module=module, highlighted_file_ids=(file_id,)
+        )
+        target = (
+            self.right_pane
+            if managed_file.document_type is DocumentType.SOLUTION
+            else self.left_pane
+        )
+        target.open_managed_file(file_id)
 
     def _set_active_pdf_pane(self, pane: PdfPane) -> None:
         self.active_pdf_pane = pane
