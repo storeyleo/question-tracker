@@ -13,10 +13,13 @@ from question_tracker.application.tracking_service import (
 from question_tracker.domain.questions import QuestionStructureError
 from question_tracker.domain.tracking import (
     AttemptStatus,
+    DEFAULT_TOPIC_COLOUR,
     NoteConflictPolicy,
     QuestionSetKind,
     SetupState,
 )
+from question_tracker.persistence.database import Database
+from question_tracker.persistence.tracking_repository import TrackingRepository
 
 
 BASE_TIME = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
@@ -359,6 +362,164 @@ def test_topics_can_be_renamed_reordered_assigned_multiple_and_removed(
 
     tracking_service.remove_topic_assignment(question.id, first.id)
     assert tracking_service.topic_ids_for_question(question.id) == (second.id,)
+
+
+def test_topic_lifecycle_and_colour_persist_across_service_restart(
+    tracking_service: TrackingService, application_paths
+) -> None:
+    question_set = create_set(tracking_service)
+    question = tracking_service.create_question(question_set.id, "1")
+    first = tracking_service.create_topic(question_set.id, "First")
+    second = tracking_service.create_topic(question_set.id, "Second")
+    tracking_service.rename_topic(second.id, "Renamed")
+    tracking_service.reorder_topic(second.id, 0)
+    tracking_service.set_topic_colour(second.id, "#1a2b3c")
+    tracking_service.assign_topic(question.id, first.id)
+    tracking_service.assign_topic(question.id, second.id)
+
+    restarted_database = Database(application_paths.database_path)
+    restarted_database.initialize()
+    restarted = TrackingService(restarted_database)
+    topics = restarted.list_topics(question_set.id)
+    assert [(topic.id, topic.title, topic.colour) for topic in topics] == [
+        (second.id, "Renamed", "#1A2B3C"),
+        (first.id, "First", DEFAULT_TOPIC_COLOUR),
+    ]
+    assert set(restarted.topic_ids_for_question(question.id)) == {
+        first.id,
+        second.id,
+    }
+
+    restarted.remove_topic_assignment(question.id, first.id)
+    restarted.delete_topic(second.id)
+    reopened = TrackingService(Database(application_paths.database_path))
+    assert [topic.id for topic in reopened.list_topics(question_set.id)] == [
+        first.id
+    ]
+    assert reopened.topic_ids_for_question(question.id) == ()
+
+
+def test_invalid_topic_colour_is_rejected_without_changing_topic(
+    tracking_service: TrackingService,
+) -> None:
+    question_set = create_set(tracking_service)
+    topic = tracking_service.create_topic(question_set.id, "Topic")
+
+    with pytest.raises(ValidationError, match="#RRGGBB"):
+        tracking_service.set_topic_colour(topic.id, "red")
+
+    assert tracking_service.get_topic(topic.id).colour == DEFAULT_TOPIC_COLOUR
+
+
+def test_effective_leaf_selection_expands_parents_and_deduplicates_overlaps(
+    tracking_service: TrackingService,
+) -> None:
+    question_set = create_set(tracking_service)
+    root = tracking_service.create_question(question_set.id, "1")
+    child = tracking_service.add_child(root.id, "a")
+    sibling = tracking_service.add_sibling(child.id, "b")
+    first_leaf = tracking_service.add_child(child.id, "i")
+    second_leaf = tracking_service.add_sibling(first_leaf.id, "ii")
+
+    selected = tracking_service.effective_leaf_question_ids(
+        question_set.id, (root.id, child.id, first_leaf.id)
+    )
+
+    assert selected == (first_leaf.id, second_leaf.id, sibling.id)
+
+
+def test_reset_attempt_history_preserves_question_data_and_topics(
+    tracking_service: TrackingService,
+) -> None:
+    question_set = tracking_service.create_question_set(
+        QuestionSetKind.PROBLEM_SHEET,
+        "Keep this name",
+        setup_state=SetupState.READY,
+        general_note="Keep this set note",
+    )
+    parent = tracking_service.create_question(question_set.id, "1")
+    leaf = tracking_service.add_child(parent.id, "a")
+    tracking_service.set_question_note(leaf.id, "Keep this question note")
+    tracking_service.set_question_bookmark(leaf.id, True)
+    topic = tracking_service.create_topic(
+        question_set.id, "Keep topic", colour="#345678"
+    )
+    tracking_service.assign_topic(leaf.id, topic.id)
+    tracking_service.add_attempt(
+        leaf.id, AttemptStatus.INCORRECT, note="Remove attempt note"
+    )
+
+    tracking_service.reset_attempt_history(question_set.id)
+
+    assert {
+        question.id
+        for question in tracking_service.list_questions(question_set.id)
+    } == {parent.id, leaf.id}
+    preserved_leaf = tracking_service.get_question(leaf.id)
+    assert preserved_leaf.note == "Keep this question note"
+    assert preserved_leaf.bookmarked
+    assert tracking_service.attempts_for_question(leaf.id) == ()
+    assert tracking_service.topic_ids_for_question(leaf.id) == (topic.id,)
+    assert tracking_service.get_topic(topic.id).colour == "#345678"
+    preserved_set = tracking_service.get_question_set(question_set.id)
+    assert preserved_set.display_name == "Keep this name"
+    assert preserved_set.general_note == "Keep this set note"
+    assert preserved_set.setup_state is SetupState.READY
+
+
+def test_reset_questions_removes_hierarchy_and_history_but_preserves_topics(
+    tracking_service: TrackingService,
+) -> None:
+    question_set = tracking_service.create_question_set(
+        QuestionSetKind.PROBLEM_SHEET,
+        "Keep this name",
+        setup_state=SetupState.READY,
+        general_note="Keep this set note",
+    )
+    leaf = tracking_service.create_question(question_set.id, "1")
+    tracking_service.set_question_note(leaf.id, "Delete question note")
+    tracking_service.set_question_bookmark(leaf.id, True)
+    topic = tracking_service.create_topic(
+        question_set.id, "Reusable", colour="#ABCDEF"
+    )
+    tracking_service.assign_topic(leaf.id, topic.id)
+    attempt = tracking_service.add_attempt(leaf.id, AttemptStatus.CORRECT)
+
+    reset = tracking_service.reset_questions(question_set.id)
+
+    assert reset.setup_state is SetupState.NEEDS_SETUP
+    assert reset.display_name == "Keep this name"
+    assert reset.general_note == "Keep this set note"
+    assert tracking_service.list_questions(question_set.id) == ()
+    with pytest.raises(NotFoundError):
+        tracking_service.get_attempt(attempt.id)
+    assert tracking_service.list_topics(question_set.id) == (topic,)
+    with tracking_service.database.read() as connection:
+        assignment_count = connection.execute(
+            "SELECT count(*) FROM question_topics WHERE question_set_id = ?",
+            (question_set.id,),
+        ).fetchone()[0]
+    assert assignment_count == 0
+
+
+def test_reset_questions_rolls_back_if_state_update_fails(
+    monkeypatch, tracking_service: TrackingService
+) -> None:
+    question_set = create_set(tracking_service)
+    question = tracking_service.create_question(question_set.id, "1")
+    attempt = tracking_service.add_attempt(question.id, AttemptStatus.CORRECT)
+
+    def fail_update(*args, **kwargs):
+        raise RuntimeError("simulated failure")
+
+    monkeypatch.setattr(
+        TrackingRepository, "update_question_set_state", fail_update
+    )
+    with pytest.raises(RuntimeError, match="simulated failure"):
+        tracking_service.reset_questions(question_set.id)
+
+    assert tracking_service.get_question(question.id).id == question.id
+    assert tracking_service.get_attempt(attempt.id).id == attempt.id
 
 
 def test_completion_mastery_and_bookmark_independence(

@@ -240,6 +240,66 @@ class LibraryService:
         with self.database.read() as connection:
             return LibraryRepository(connection).list_files()
 
+    def module_for_question_set(
+        self, question_set_id: str
+    ) -> LibraryModule | None:
+        """Return the managed-library module containing a question set."""
+        main_files = self.files_for_question_set(question_set_id, FileRole.MAIN)
+        if not main_files:
+            return None
+        parts = main_files[0].relative_path.parts
+        if len(parts) < 2:
+            return None
+        return LibraryModule(parts[0], parts[1])
+
+    def question_sets_for_module(
+        self, year_name: str, module_name: str
+    ) -> tuple[QuestionSet, ...]:
+        """List question sets whose main PDFs belong to one module."""
+        question_sets: dict[str, QuestionSet] = {}
+        for managed_file in self.list_files():
+            if managed_file.document_type is DocumentType.SOLUTION:
+                continue
+            parts = managed_file.relative_path.parts
+            if len(parts) < 2 or parts[:2] != (year_name, module_name):
+                continue
+            for question_set in self.question_sets_for_file(
+                managed_file.id, FileRole.MAIN
+            ):
+                question_sets[question_set.id] = question_set
+        return tuple(
+            sorted(
+                question_sets.values(),
+                key=lambda item: (
+                    0 if item.kind is QuestionSetKind.PROBLEM_SHEET else 1,
+                    item.display_order is None,
+                    item.display_order if item.display_order is not None else 0,
+                    item.display_name.casefold(),
+                    item.id,
+                ),
+            )
+        )
+
+    def reorder_question_set(self, question_set_id: str, new_index: int) -> None:
+        """Persist a position within the main PDF's module and category."""
+        with self.database.transaction() as connection:
+            repository = TrackingRepository(connection)
+            selected = repository.get_question_set(question_set_id)
+            module = self.module_for_question_set(question_set_id)
+            if selected is None or module is None:
+                raise InvalidTargetError("Question set must belong to a managed module")
+            siblings = [
+                item for item in self.question_sets_for_module(
+                    module.year_name, module.module_name
+                ) if item.kind is selected.kind
+            ]
+            if new_index < 0 or new_index >= len(siblings):
+                raise InvalidTargetError("Question-set position is out of range")
+            siblings = [item for item in siblings if item.id != question_set_id]
+            siblings.insert(new_index, selected)
+            for position, item in enumerate(siblings):
+                repository.update_question_set_order(item.id, position)
+
     def associate_reference(self, question_set_id: str, file_id: str) -> None:
         with self.database.transaction() as connection:
             repository = LibraryRepository(connection)

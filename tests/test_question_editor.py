@@ -1,7 +1,15 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QDialog, QInputDialog, QMessageBox
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QColorDialog,
+    QDialog,
+    QInputDialog,
+    QLabel,
+    QMessageBox,
+)
 
 from question_tracker.application.tracking_service import TrackingService
 from question_tracker.domain.tracking import QuestionSetKind, SetupState
@@ -129,6 +137,156 @@ def test_question_details_and_multiple_topic_assignments_are_saved(
     }
 
 
+def test_multiple_leaf_questions_can_receive_one_topic_assignment(
+    qtbot, tracking_service: TrackingService
+) -> None:
+    question_set = _new_set(tracking_service)
+    first = tracking_service.create_question(question_set.id, "1")
+    second = tracking_service.create_question(question_set.id, "2")
+    topic = tracking_service.create_topic(question_set.id, "Vectors")
+    tracking_service.assign_topic(first.id, topic.id)
+    dialog = QuestionEditorDialog(tracking_service, question_set.id)
+    qtbot.addWidget(dialog)
+    first_item = _tree_item_for_id(dialog, first.id)
+    second_item = _tree_item_for_id(dialog, second.id)
+
+    dialog.question_tree.clearSelection()
+    first_item.setSelected(True)
+    second_item.setSelected(True)
+
+    assert dialog.question_tree.selectionMode() is QAbstractItemView.SelectionMode.ExtendedSelection
+    assert dialog.assignment_list.isEnabled()
+    assignment = dialog.assignment_list.item(0)
+    assert assignment.checkState() is Qt.CheckState.PartiallyChecked
+    assignment.setCheckState(Qt.CheckState.Checked)
+    assert tracking_service.topic_ids_for_question(first.id) == (topic.id,)
+    assert tracking_service.topic_ids_for_question(second.id) == (topic.id,)
+
+
+def test_selected_parent_and_child_expand_to_deduplicated_leaf_assignments(
+    qtbot, tracking_service: TrackingService
+) -> None:
+    question_set = _new_set(tracking_service)
+    root = tracking_service.create_question(question_set.id, "1")
+    child = tracking_service.add_child(root.id, "a")
+    first = tracking_service.add_child(child.id, "i")
+    second = tracking_service.add_sibling(first.id, "ii")
+    sibling = tracking_service.add_sibling(child.id, "b")
+    topic = tracking_service.create_topic(question_set.id, "Vectors")
+    dialog = QuestionEditorDialog(tracking_service, question_set.id)
+    qtbot.addWidget(dialog)
+
+    dialog.question_tree.clearSelection()
+    _tree_item_for_id(dialog, root.id).setSelected(True)
+    _tree_item_for_id(dialog, child.id).setSelected(True)
+    dialog.assignment_list.item(0).setCheckState(Qt.CheckState.Checked)
+
+    assert dialog.assignment_list.isEnabled()
+    assert tracking_service.effective_leaf_question_ids(
+        question_set.id, (root.id, child.id)
+    ) == (first.id, second.id, sibling.id)
+    for leaf in (first, second, sibling):
+        assert tracking_service.topic_ids_for_question(leaf.id) == (topic.id,)
+
+
+def test_shift_range_containing_parents_can_receive_topic(
+    qtbot, tracking_service: TrackingService
+) -> None:
+    question_set = _new_set(tracking_service)
+    first_root = tracking_service.create_question(question_set.id, "1")
+    first_leaf = tracking_service.add_child(first_root.id, "a")
+    tracking_service.add_sibling(first_leaf.id, "b")
+    second_root = tracking_service.create_question(question_set.id, "2")
+    second_leaf = tracking_service.add_child(second_root.id, "a")
+    final_leaf = tracking_service.add_sibling(second_leaf.id, "b")
+    topic = tracking_service.create_topic(question_set.id, "Range topic")
+    dialog = QuestionEditorDialog(tracking_service, question_set.id)
+    qtbot.addWidget(dialog)
+    dialog.show()
+
+    first_item = _tree_item_for_id(dialog, first_root.id)
+    final_item = _tree_item_for_id(dialog, final_leaf.id)
+    qtbot.mouseClick(
+        dialog.question_tree.viewport(),
+        Qt.MouseButton.LeftButton,
+        pos=dialog.question_tree.visualItemRect(first_item).center(),
+    )
+    qtbot.mouseClick(
+        dialog.question_tree.viewport(),
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.ShiftModifier,
+        dialog.question_tree.visualItemRect(final_item).center(),
+    )
+    dialog.assignment_list.item(0).setCheckState(Qt.CheckState.Checked)
+
+    for leaf in tracking_service.leaf_questions(question_set.id):
+        assert tracking_service.topic_ids_for_question(leaf.id) == (topic.id,)
+
+
+def test_topic_badges_and_colour_refresh_immediately(
+    qtbot, monkeypatch, tracking_service: TrackingService
+) -> None:
+    question_set = _new_set(tracking_service)
+    question = tracking_service.create_question(question_set.id, "1")
+    first = tracking_service.create_topic(question_set.id, "Bases")
+    second = tracking_service.create_topic(question_set.id, "Vectors")
+    tracking_service.assign_topic(question.id, first.id)
+    tracking_service.assign_topic(question.id, second.id)
+    dialog = QuestionEditorDialog(tracking_service, question_set.id)
+    qtbot.addWidget(dialog)
+
+    assert dialog.findChild(QLabel, f"topicBadge-{question.id}-{first.id}")
+    assert dialog.findChild(QLabel, f"topicBadge-{question.id}-{second.id}")
+    monkeypatch.setattr(
+        QColorDialog, "getColor", lambda *args, **kwargs: QColor("#112233")
+    )
+    dialog.topic_list.setCurrentRow(0)
+    qtbot.mouseClick(dialog.topic_colour_button, Qt.MouseButton.LeftButton)
+
+    assert tracking_service.get_topic(first.id).colour == "#112233"
+    badge = dialog.findChild(QLabel, f"topicBadge-{question.id}-{first.id}")
+    assert "background: #112233" in badge.styleSheet()
+    assert "color: #FFFFFF" in badge.styleSheet()
+
+    dialog.assignment_list.item(0).setCheckState(Qt.CheckState.Unchecked)
+    assert tracking_service.topic_ids_for_question(question.id) == (second.id,)
+    assert dialog.findChild(QLabel, f"topicBadge-{question.id}-{first.id}") is None
+
+
+def test_editor_reset_actions_use_confirmed_service_operations(
+    qtbot, monkeypatch, tracking_service: TrackingService
+) -> None:
+    question_set = tracking_service.create_question_set(
+        QuestionSetKind.PROBLEM_SHEET,
+        "Ready",
+        setup_state=SetupState.READY,
+    )
+    question = tracking_service.create_question(question_set.id, "1")
+    tracking_service.add_attempt(question.id, "incorrect", note="Remove me")
+    dialog = QuestionEditorDialog(tracking_service, question_set.id)
+    qtbot.addWidget(dialog)
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Yes,
+    )
+
+    dialog.reset_attempts_action.trigger()
+
+    assert tracking_service.attempts_for_question(question.id) == ()
+    tracking_service.add_attempt(question.id, "partial")
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Yes,
+    )
+    dialog.reset_questions_action.trigger()
+
+    assert tracking_service.list_questions(question_set.id) == ()
+    assert dialog.question_tree.topLevelItemCount() == 0
+    assert not dialog.finish_setup_button.isHidden()
+
+
 def test_close_preserves_auto_saved_edits_without_finishing_setup(
     qtbot, tracking_service: TrackingService
 ) -> None:
@@ -217,3 +375,27 @@ def test_home_action_opens_selected_question_set_editor(
     qtbot.mouseClick(home.open_button, Qt.MouseButton.LeftButton)
 
     assert opened == [question_set.id]
+
+
+def test_home_refresh_rescans_manually_added_pdfs(
+    qtbot,
+    tracking_service: TrackingService,
+    application_paths: ApplicationPaths,
+) -> None:
+    home = HomeScreen(tracking_service, application_paths)
+    qtbot.addWidget(home)
+    pdf = (
+        application_paths.managed_library_root
+        / "Year 2"
+        / "Linear Algebra"
+        / "Problem Sheets"
+        / "New sheet.pdf"
+    )
+    pdf.parent.mkdir(parents=True)
+    pdf.write_bytes(b"%PDF-1.4\n%%EOF\n")
+
+    qtbot.mouseClick(home.refresh_button, Qt.MouseButton.LeftButton)
+
+    assert home.question_set_list.count() == 1
+    assert "New sheet" in home.question_set_list.item(0).text()
+    assert "Needs setup" in home.question_set_list.item(0).text()

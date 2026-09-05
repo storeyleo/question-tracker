@@ -4,8 +4,11 @@ from collections import defaultdict
 from collections.abc import Callable
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QAction, QBrush, QColor
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
+    QColorDialog,
     QDialog,
     QFormLayout,
     QGridLayout,
@@ -16,6 +19,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -37,6 +41,8 @@ from question_tracker.domain.questions import (
     visible_question_label,
 )
 from question_tracker.domain.tracking import NoteConflictPolicy, SetupState, Topic
+from question_tracker.ui.colours import contrasting_text_colour
+from question_tracker.ui.quick_builder import QuickBuilderDialog
 
 
 class QuestionEditorDialog(QDialog):
@@ -53,6 +59,7 @@ class QuestionEditorDialog(QDialog):
         self.question_set_id = question_set_id
         self._questions: tuple[Question, ...] = ()
         self._topics: tuple[Topic, ...] = ()
+        self._question_items: dict[str, QTreeWidgetItem] = {}
         self._updating_assignments = False
         self._loading_question_details = False
 
@@ -73,8 +80,14 @@ class QuestionEditorDialog(QDialog):
 
         self.question_tree = QTreeWidget()
         self.question_tree.setObjectName("questionTree")
-        self.question_tree.setHeaderLabel("Question hierarchy")
-        self.question_tree.currentItemChanged.connect(self._question_selected)
+        self.question_tree.setColumnCount(2)
+        self.question_tree.setHeaderLabels(("Question hierarchy", "Topics"))
+        self.question_tree.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        self.question_tree.itemSelectionChanged.connect(
+            self._question_selection_changed
+        )
 
         question_buttons = QGridLayout()
         self.add_root_button = self._button("Add root", "addRootButton", self._add_root)
@@ -112,6 +125,23 @@ class QuestionEditorDialog(QDialog):
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.addWidget(self.question_tree)
         left_layout.addLayout(question_buttons)
+        self.quick_builder_button = self._button(
+            "Quick builder…", "quickBuilderButton", self._quick_build
+        )
+        left_layout.addWidget(self.quick_builder_button)
+        self.reset_button = QPushButton("Reset")
+        self.reset_button.setObjectName("resetQuestionSetButton")
+        reset_menu = QMenu(self.reset_button)
+        self.reset_attempts_action = QAction("Reset attempt history", reset_menu)
+        self.reset_attempts_action.setObjectName("resetAttemptHistoryAction")
+        self.reset_attempts_action.triggered.connect(self._reset_attempt_history)
+        self.reset_questions_action = QAction("Reset questions", reset_menu)
+        self.reset_questions_action.setObjectName("resetQuestionsAction")
+        self.reset_questions_action.triggered.connect(self._reset_questions)
+        reset_menu.addAction(self.reset_attempts_action)
+        reset_menu.addAction(self.reset_questions_action)
+        self.reset_button.setMenu(reset_menu)
+        left_layout.addWidget(self.reset_button)
 
         self.question_note_edit = QPlainTextEdit()
         self.question_note_edit.setObjectName("questionNoteEdit")
@@ -141,12 +171,16 @@ class QuestionEditorDialog(QDialog):
         self.topic_down_button = self._button(
             "Down", "moveTopicDownButton", self._topic_down
         )
+        self.topic_colour_button = self._button(
+            "Colour", "topicColourButton", self._change_topic_colour
+        )
         for button in (
             self.add_topic_button,
             self.rename_topic_button,
             self.delete_topic_button,
             self.topic_up_button,
             self.topic_down_button,
+            self.topic_colour_button,
         ):
             topic_buttons.addWidget(button)
 
@@ -157,7 +191,8 @@ class QuestionEditorDialog(QDialog):
         topics_layout = QVBoxLayout(topics)
         topics_layout.addWidget(self.topic_list)
         topics_layout.addLayout(topic_buttons)
-        topics_layout.addWidget(QLabel("Assignments for selected leaf"))
+        self.assignment_heading = QLabel("Assignments for selected leaf question(s)")
+        topics_layout.addWidget(self.assignment_heading)
         topics_layout.addWidget(self.assignment_list)
 
         right = QWidget()
@@ -210,6 +245,7 @@ class QuestionEditorDialog(QDialog):
             siblings.sort(key=lambda item: item.sort_order)
 
         self.question_tree.clear()
+        self._question_items = {}
         selected_item: QTreeWidgetItem | None = None
 
         def add_items(parent_item: QTreeWidgetItem | None, parent_id: str | None) -> None:
@@ -219,6 +255,7 @@ class QuestionEditorDialog(QDialog):
                     [visible_question_label(question.id, self._questions)]
                 )
                 item.setData(0, Qt.ItemDataRole.UserRole, question.id)
+                self._question_items[question.id] = item
                 if parent_item is None:
                     self.question_tree.addTopLevelItem(item)
                 else:
@@ -228,6 +265,7 @@ class QuestionEditorDialog(QDialog):
                 add_items(item, question.id)
 
         add_items(None, None)
+        self._refresh_question_topic_badges()
         self.question_tree.expandAll()
         if selected_item is not None:
             self.question_tree.setCurrentItem(selected_item)
@@ -245,6 +283,7 @@ class QuestionEditorDialog(QDialog):
         for topic in self._topics:
             item = QListWidgetItem(topic.title)
             item.setData(Qt.ItemDataRole.UserRole, topic.id)
+            self._style_topic_item(item, topic)
             self.topic_list.addItem(item)
             if topic.id == preferred_id:
                 selected_item = item
@@ -253,12 +292,16 @@ class QuestionEditorDialog(QDialog):
         elif self.topic_list.count():
             self.topic_list.setCurrentRow(0)
         self._refresh_assignments()
+        self._refresh_question_topic_badges()
 
     def _question_selected(
         self, current: QTreeWidgetItem | None, previous: QTreeWidgetItem | None
     ) -> None:
         del previous
-        question = self._question_for_item(current)
+        selected_questions = self._selected_questions()
+        question = (
+            selected_questions[0] if len(selected_questions) == 1 else None
+        )
         enabled = question is not None
         for button in (
             self.add_sibling_button,
@@ -284,26 +327,43 @@ class QuestionEditorDialog(QDialog):
             self._loading_question_details = False
         self._refresh_assignments()
 
+    def _question_selection_changed(self) -> None:
+        self._question_selected(self.question_tree.currentItem(), None)
+
     def _topic_selection_changed(
         self, current: QListWidgetItem | None, previous: QListWidgetItem | None
     ) -> None:
-        del current, previous
+        del previous
         enabled = self._selected_topic_id() is not None
         self.rename_topic_button.setEnabled(enabled)
         self.delete_topic_button.setEnabled(enabled)
         self.topic_up_button.setEnabled(enabled)
         self.topic_down_button.setEnabled(enabled)
+        self.topic_colour_button.setEnabled(enabled)
+        if current is None:
+            self.topic_colour_button.setStyleSheet("")
+            return
+        topic = self.service.get_topic(
+            str(current.data(Qt.ItemDataRole.UserRole))
+        )
+        self.topic_colour_button.setStyleSheet(
+            f"background: {topic.colour}; "
+            f"color: {contrasting_text_colour(topic.colour)};"
+        )
 
     def _refresh_assignments(self) -> None:
-        question_id = self._selected_question_id()
-        leaf_ids = {
-            question.id for question in self.service.leaf_questions(self.question_set_id)
-        }
-        assignable = question_id is not None and question_id in leaf_ids
-        assigned = (
-            set(self.service.topic_ids_for_question(question_id))
-            if assignable and question_id is not None
-            else set()
+        selected_ids = self._selected_question_ids()
+        selected_leaf_ids = self.service.effective_leaf_question_ids(
+            self.question_set_id, selected_ids
+        )
+        assignable = bool(selected_leaf_ids)
+        assignments = (
+            {
+                question_id: set(self.service.topic_ids_for_question(question_id))
+                for question_id in selected_leaf_ids
+            }
+            if assignable
+            else {}
         )
         self._updating_assignments = True
         try:
@@ -311,14 +371,27 @@ class QuestionEditorDialog(QDialog):
             for topic in self._topics:
                 item = QListWidgetItem(topic.title)
                 item.setData(Qt.ItemDataRole.UserRole, topic.id)
-                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                item.setCheckState(
-                    Qt.CheckState.Checked
-                    if topic.id in assigned
-                    else Qt.CheckState.Unchecked
+                self._style_topic_item(item, topic)
+                item.setFlags(
+                    item.flags()
+                    | Qt.ItemFlag.ItemIsUserCheckable
                 )
+                assigned_count = sum(
+                    topic.id in assigned for assigned in assignments.values()
+                )
+                if assigned_count == len(selected_leaf_ids) and selected_leaf_ids:
+                    state = Qt.CheckState.Checked
+                elif assigned_count:
+                    state = Qt.CheckState.PartiallyChecked
+                else:
+                    state = Qt.CheckState.Unchecked
+                item.setCheckState(state)
                 self.assignment_list.addItem(item)
             self.assignment_list.setEnabled(assignable)
+            self.assignment_heading.setText(
+                f"Assignments for {len(selected_leaf_ids)} selected leaf"
+                f"{'s' if len(selected_leaf_ids) != 1 else ''}"
+            )
         finally:
             self._updating_assignments = False
 
@@ -329,6 +402,11 @@ class QuestionEditorDialog(QDialog):
         self._run_question_action(
             lambda: self.service.create_question(self.question_set_id, label)
         )
+
+    def _quick_build(self) -> None:
+        dialog = QuickBuilderDialog(self.service, self.question_set_id, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._refresh_questions()
 
     def _add_sibling(self) -> None:
         question_id = self._selected_question_id()
@@ -598,21 +676,83 @@ class QuestionEditorDialog(QDialog):
         if self._run(lambda: self.service.reorder_topic(topic_id, target_index)) is not None:
             self._refresh_topics(topic_id)
 
+    def _change_topic_colour(self) -> None:
+        topic_id = self._selected_topic_id()
+        if topic_id is None:
+            return
+        topic = self.service.get_topic(topic_id)
+        chosen = QColorDialog.getColor(
+            QColor(topic.colour), self, "Choose topic colour"
+        )
+        if not chosen.isValid():
+            return
+        colour = chosen.name(QColor.NameFormat.HexRgb).upper()
+        if colour == topic.colour:
+            return
+        if self._run(
+            lambda: self.service.set_topic_colour(topic_id, colour)
+        ) is not None:
+            self._refresh_topics(topic_id)
+
     def _assignment_changed(self, item: QListWidgetItem) -> None:
         if self._updating_assignments:
             return
-        question_id = self._selected_question_id()
-        if question_id is None:
+        question_ids = self.service.effective_leaf_question_ids(
+            self.question_set_id, self._selected_question_ids()
+        )
+        if not question_ids:
             return
         topic_id = str(item.data(Qt.ItemDataRole.UserRole))
-        if item.checkState() == Qt.CheckState.Checked:
-            operation = lambda: self.service.assign_topic(question_id, topic_id)
-        else:
-            operation = lambda: self.service.remove_topic_assignment(
-                question_id, topic_id
-            )
+        assigned = item.checkState() == Qt.CheckState.Checked
+        operation = lambda: self.service.set_topic_assignments(
+            question_ids, topic_id, assigned
+        )
         if self._run(operation, none_is_success=True) is False:
             self._refresh_assignments()
+            return
+        self._refresh_assignments()
+        self._refresh_question_topic_badges()
+
+    def _reset_attempt_history(self, checked: bool = False) -> None:
+        del checked
+        if (
+            QMessageBox.question(
+                self,
+                "Reset attempt history",
+                "Permanently delete every attempt and attempt note for this "
+                "question set? Questions, bookmarks, question notes, topics, "
+                "and files will be preserved.",
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+        self._run(
+            lambda: self.service.reset_attempt_history(self.question_set_id),
+            none_is_success=True,
+        )
+
+    def _reset_questions(self, checked: bool = False) -> None:
+        del checked
+        response = QMessageBox.warning(
+            self,
+            "Reset questions",
+            "Permanently delete the complete question hierarchy, all attempt "
+            "history, question notes, bookmarks, and topic assignments? The "
+            "question set, its files, metadata, and topic definitions will be "
+            "preserved. This cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if response != QMessageBox.StandardButton.Yes:
+            return
+        reset = self._run(
+            lambda: self.service.reset_questions(self.question_set_id)
+        )
+        if reset is None:
+            return
+        self.finish_setup_button.setVisible(True)
+        self._refresh_questions()
+        self._refresh_topics()
 
     def _finish_setup(self) -> None:
         saved = self._run(
@@ -626,6 +766,50 @@ class QuestionEditorDialog(QDialog):
             updated if question.id == updated.id else question
             for question in self._questions
         )
+
+    def _refresh_question_topic_badges(self) -> None:
+        if not self._question_items:
+            return
+        leaf_ids = {
+            question.id for question in self.service.leaf_questions(self.question_set_id)
+        }
+        topics_by_id = {topic.id: topic for topic in self._topics}
+        for question_id, item in self._question_items.items():
+            existing = self.question_tree.itemWidget(item, 1)
+            if existing is not None:
+                self.question_tree.removeItemWidget(item, 1)
+                existing.setParent(None)
+                existing.deleteLater()
+            if question_id not in leaf_ids:
+                continue
+            topics = tuple(
+                topics_by_id[topic_id]
+                for topic_id in self.service.topic_ids_for_question(question_id)
+                if topic_id in topics_by_id
+            )
+            if not topics:
+                continue
+            container = QWidget()
+            badges = QHBoxLayout(container)
+            badges.setContentsMargins(2, 0, 2, 0)
+            badges.setSpacing(3)
+            for topic in sorted(topics, key=lambda value: value.sort_order):
+                badge = QLabel(topic.title)
+                badge.setObjectName(f"topicBadge-{question_id}-{topic.id}")
+                badge.setStyleSheet(
+                    f"background: {topic.colour}; "
+                    f"color: {contrasting_text_colour(topic.colour)}; "
+                    "border-radius: 5px; padding: 1px 4px;"
+                )
+                badge.setToolTip(topic.title)
+                badges.addWidget(badge)
+            badges.addStretch()
+            self.question_tree.setItemWidget(item, 1, container)
+
+    @staticmethod
+    def _style_topic_item(item: QListWidgetItem, topic: Topic) -> None:
+        item.setBackground(QBrush(QColor(topic.colour)))
+        item.setForeground(QBrush(QColor(contrasting_text_colour(topic.colour))))
 
     def _run_question_action(
         self,
@@ -697,22 +881,23 @@ class QuestionEditorDialog(QDialog):
         return text if accepted else None
 
     def _selected_question_id(self) -> str | None:
-        item = self.question_tree.currentItem()
-        if item is None:
-            return None
-        return str(item.data(0, Qt.ItemDataRole.UserRole))
+        selected_ids = self._selected_question_ids()
+        return selected_ids[0] if len(selected_ids) == 1 else None
+
+    def _selected_question_ids(self) -> tuple[str, ...]:
+        return tuple(
+            str(item.data(0, Qt.ItemDataRole.UserRole))
+            for item in self.question_tree.selectedItems()
+        )
+
+    def _selected_questions(self) -> tuple[Question, ...]:
+        selected_ids = set(self._selected_question_ids())
+        return tuple(
+            question for question in self._questions if question.id in selected_ids
+        )
 
     def _selected_topic_id(self) -> str | None:
         item = self.topic_list.currentItem()
         if item is None:
             return None
         return str(item.data(Qt.ItemDataRole.UserRole))
-
-    def _question_for_item(self, item: QTreeWidgetItem | None) -> Question | None:
-        if item is None:
-            return None
-        question_id = str(item.data(0, Qt.ItemDataRole.UserRole))
-        return next(
-            (question for question in self._questions if question.id == question_id),
-            None,
-        )

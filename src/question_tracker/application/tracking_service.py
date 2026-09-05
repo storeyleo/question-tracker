@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import re
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from question_tracker.domain.questions import (
@@ -18,6 +19,7 @@ from question_tracker.domain.questions import (
 from question_tracker.domain.tracking import (
     Attempt,
     AttemptStatus,
+    DEFAULT_TOPIC_COLOUR,
     NoteConflictPolicy,
     QuestionSet,
     QuestionSetKind,
@@ -354,6 +356,17 @@ class TrackingService:
             )
             return _require_question(repository, question_id)
 
+    def set_question_bookmark(self, question_id: str, bookmarked: bool) -> Question:
+        if not isinstance(bookmarked, bool):
+            raise ValidationError("Bookmark state must be true or false")
+        with self.database.transaction() as connection:
+            repository = TrackingRepository(connection)
+            _require_question(repository, question_id)
+            repository.update_question_bookmark(
+                question_id, bookmarked, _time_text(_utc_now())
+            )
+            return _require_question(repository, question_id)
+
     def delete_question_permanently(self, question_id: str) -> None:
         with self.database.transaction() as connection:
             repository = TrackingRepository(connection)
@@ -439,8 +452,15 @@ class TrackingService:
                 if leaf.id not in subtree_ids
             )
 
-    def create_topic(self, question_set_id: str, title: str) -> Topic:
+    def create_topic(
+        self,
+        question_set_id: str,
+        title: str,
+        *,
+        colour: str = DEFAULT_TOPIC_COLOUR,
+    ) -> Topic:
         clean_title = _required_text(title, "Topic title")
+        clean_colour = _topic_colour(colour)
         with self.database.transaction() as connection:
             repository = TrackingRepository(connection)
             _require_question_set(repository, question_set_id)
@@ -450,6 +470,7 @@ class TrackingService:
                 question_set_id=question_set_id,
                 title=clean_title,
                 sort_order=len(topics),
+                colour=clean_colour,
             )
             try:
                 repository.insert_topic(topic)
@@ -482,6 +503,14 @@ class TrackingService:
             topics.remove(topic)
             topics.insert(new_index, topic)
             _rewrite_topic_order(repository, topics)
+            return _require_topic(repository, topic_id)
+
+    def set_topic_colour(self, topic_id: str, colour: str) -> Topic:
+        clean_colour = _topic_colour(colour)
+        with self.database.transaction() as connection:
+            repository = TrackingRepository(connection)
+            _require_topic(repository, topic_id)
+            repository.update_topic_colour(topic_id, clean_colour)
             return _require_topic(repository, topic_id)
 
     def list_topics(self, question_set_id: str) -> tuple[Topic, ...]:
@@ -527,6 +556,87 @@ class TrackingService:
             _require_question(repository, question_id)
             return repository.topic_ids_for_question(question_id)
 
+    def set_topic_assignments(
+        self, question_ids: tuple[str, ...], topic_id: str, assigned: bool
+    ) -> None:
+        """Apply a multi-selection checkbox change atomically."""
+        with self.database.transaction() as connection:
+            repository = TrackingRepository(connection)
+            topic = _require_topic(repository, topic_id)
+            questions = repository.list_questions(topic.question_set_id)
+            leaves = {q.id for q in leaf_questions_in_display_order(
+                questions, topic.question_set_id
+            )}
+            if not set(question_ids) <= leaves:
+                raise ValidationError("Topics require leaf questions in the same set")
+            for question_id in question_ids:
+                if assigned:
+                    repository.assign_topic(question_id, topic.id, topic.question_set_id)
+                else:
+                    repository.remove_topic_assignment(question_id, topic.id)
+
+    def effective_leaf_question_ids(
+        self, question_set_id: str, selected_question_ids: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        """Expand selected hierarchy nodes to distinct leaves in visible order."""
+        if not selected_question_ids:
+            return ()
+        with self.database.read() as connection:
+            repository = TrackingRepository(connection)
+            _require_question_set(repository, question_set_id)
+            questions = repository.list_questions(question_set_id)
+            selected_leaf_ids: set[str] = set()
+            leaves = leaf_questions_in_display_order(questions, question_set_id)
+            leaf_ids = {leaf.id for leaf in leaves}
+            for question_id in dict.fromkeys(selected_question_ids):
+                question = _require_question(repository, question_id)
+                if question.question_set_id != question_set_id:
+                    raise ValidationError(
+                        "Selected questions must belong to the same question set"
+                    )
+                selected_leaf_ids.update(
+                    item.id
+                    for item in question_subtree_in_display_order(
+                        question.id, questions
+                    )
+                    if item.id in leaf_ids
+                )
+            return tuple(
+                leaf.id for leaf in leaves if leaf.id in selected_leaf_ids
+            )
+
+    def append_question_structure(
+        self, question_set_id: str, child_counts: tuple[tuple[int, ...], ...]
+    ) -> tuple[Question, ...]:
+        """Append roots; each inner tuple gives grandchild counts for its children."""
+        if not child_counts or len(child_counts) > 100:
+            raise ValidationError("Choose between 1 and 100 main questions")
+        for counts in child_counts:
+            if len(counts) > 26 or any(
+                type(count) is not int or count < 0 or count > 20 for count in counts
+            ):
+                raise ValidationError("Use at most 26 children and 20 grandchildren")
+        with self.database.transaction() as connection:
+            repository = TrackingRepository(connection)
+            _require_question_set(repository, question_set_id)
+            existing = repository.list_questions(question_set_id)
+            used_labels = {q.local_label for q in existing if q.parent_id is None}
+            number = 1
+            for counts in child_counts:
+                while str(number) in used_labels:
+                    number += 1
+                root = self._create_question(repository, question_set_id, str(number), None)
+                used_labels.add(str(number))
+                for index, count in enumerate(counts):
+                    child = self._create_question(
+                        repository, question_set_id, chr(ord('a') + index), root
+                    )
+                    for grandchild_index in range(1, count + 1):
+                        self._create_question(
+                            repository, question_set_id, _roman_label(grandchild_index), child
+                        )
+            return repository.list_questions(question_set_id)
+
     def add_attempt(
         self,
         question_id: str,
@@ -536,6 +646,7 @@ class TrackingService:
         note: str = "",
     ) -> Attempt:
         attempt_status = _enum_value(AttemptStatus, status, "attempt status")
+        generated_timestamp = timestamp is None
         occurred_at = _aware_utc(timestamp or _utc_now())
         created_at = _utc_now()
         with self.database.transaction() as connection:
@@ -544,6 +655,18 @@ class TrackingService:
             questions = repository.list_questions(question.question_set_id)
             if not is_leaf(question.id, questions):
                 raise ValidationError("Attempts can only be added to leaf questions")
+            existing_attempts = repository.list_attempts_for_question(question.id)
+            if existing_attempts:
+                latest_timestamp = max(
+                    attempt.timestamp for attempt in existing_attempts
+                )
+                latest_created_at = max(
+                    attempt.created_at for attempt in existing_attempts
+                )
+                if generated_timestamp and occurred_at <= latest_timestamp:
+                    occurred_at = latest_timestamp + timedelta(microseconds=1)
+                if created_at <= latest_created_at:
+                    created_at = latest_created_at + timedelta(microseconds=1)
             attempt = Attempt(
                 id=str(uuid4()),
                 question_id=question_id,
@@ -589,6 +712,37 @@ class TrackingService:
             repository = TrackingRepository(connection)
             _require_attempt(repository, attempt_id)
             repository.delete_attempt(attempt_id)
+
+    def restore_attempt(self, attempt: Attempt) -> Attempt:
+        """Restore an exact attempt snapshot for session undo/redo."""
+        with self.database.transaction() as connection:
+            repository = TrackingRepository(connection)
+            if repository.get_attempt(attempt.id) is not None:
+                raise ValidationError(f"Attempt already exists: {attempt.id}")
+            question = _require_question(repository, attempt.question_id)
+            questions = repository.list_questions(question.question_set_id)
+            if not is_leaf(question.id, questions):
+                raise ValidationError("Attempts can only be restored to leaf questions")
+            repository.insert_attempt(attempt)
+            return _require_attempt(repository, attempt.id)
+
+    def reset_attempt_history(self, question_set_id: str) -> None:
+        """Permanently remove only attempts belonging to one question set."""
+        with self.database.transaction() as connection:
+            repository = TrackingRepository(connection)
+            _require_question_set(repository, question_set_id)
+            repository.delete_attempts_for_set(question_set_id)
+
+    def reset_questions(self, question_set_id: str) -> QuestionSet:
+        """Remove the hierarchy and history, preserving the set and its topics."""
+        with self.database.transaction() as connection:
+            repository = TrackingRepository(connection)
+            _require_question_set(repository, question_set_id)
+            repository.delete_questions_for_set(question_set_id)
+            repository.update_question_set_state(
+                question_set_id, SetupState.NEEDS_SETUP, _time_text(_utc_now())
+            )
+            return _require_question_set(repository, question_set_id)
 
     def attempts_for_question(self, question_id: str) -> tuple[Attempt, ...]:
         with self.database.read() as connection:
@@ -764,11 +918,26 @@ def _resolve_note_conflict(
     return f"{target_note}\n\n{source_note}"
 
 
+def _roman_label(number: int) -> str:
+    result = ""
+    for value, label in ((10, "x"), (9, "ix"), (5, "v"), (4, "iv"), (1, "i")):
+        while number >= value:
+            result += label
+            number -= value
+    return result
+
+
 def _required_text(value: str, field_name: str) -> str:
     cleaned = value.strip()
     if not cleaned:
         raise ValidationError(f"{field_name} cannot be empty")
     return cleaned
+
+
+def _topic_colour(value: str) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"#[0-9A-Fa-f]{6}", value) is None:
+        raise ValidationError("Topic colour must use #RRGGBB format")
+    return value.upper()
 
 
 def _enum_value(enum_type, value, field_name: str):

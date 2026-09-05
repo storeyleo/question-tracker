@@ -440,3 +440,49 @@ def test_replace_missing_pdf_preserves_uuid(
     assert replaced.id == managed_file.id
     assert replaced.availability is FileAvailability.PRESENT
     assert destination.read_bytes() == replacement_content
+
+
+def test_reset_questions_preserves_main_and_reference_pdf_associations(
+    library_service: LibraryService,
+    tracking_service: TrackingService,
+    application_paths: ApplicationPaths,
+) -> None:
+    library_service.create_year("Year 1")
+    library_service.create_module("Year 1", "Algebra")
+    main_source = application_paths.data_dir / "Sheet.pdf"
+    solution_source = application_paths.data_dir / "Solution.pdf"
+    write_pdf(main_source)
+    write_pdf(solution_source)
+    main = library_service.import_pdf(
+        main_source, "Year 1", "Algebra", DocumentType.PROBLEM_SHEET
+    )
+    solution = library_service.import_pdf(
+        solution_source, "Year 1", "Algebra", DocumentType.SOLUTION
+    )
+    question_set = question_set_for_main(library_service, main.id)
+    library_service.associate_reference(question_set.id, solution.id)
+    question = tracking_service.create_question(question_set.id, "1")
+    tracking_service.add_attempt(question.id, AttemptStatus.PARTIAL)
+    tracking_service.finish_question_set_setup(question_set.id)
+
+    tracking_service.reset_attempt_history(question_set.id)
+
+    assert library_service.files_for_question_set(
+        question_set.id, FileRole.MAIN
+    ) == (main,)
+    assert library_service.files_for_question_set(
+        question_set.id, FileRole.REFERENCE
+    ) == (solution,)
+
+    tracking_service.reset_questions(question_set.id)
+
+    assert library_service.files_for_question_set(
+        question_set.id, FileRole.MAIN
+    ) == (main,)
+    assert library_service.files_for_question_set(
+        question_set.id, FileRole.REFERENCE
+    ) == (solution,)
+    assert (
+        tracking_service.get_question_set(question_set.id).setup_state
+        is SetupState.NEEDS_SETUP
+    )

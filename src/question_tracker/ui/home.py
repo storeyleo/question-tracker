@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -11,7 +13,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from question_tracker.application.library_service import LibraryService
 from question_tracker.application.tracking_service import TrackingService
+from question_tracker.domain.tracking import SetupState
 from question_tracker.paths import ApplicationPaths
 from question_tracker.ui.question_editor import QuestionEditorDialog
 
@@ -24,10 +28,17 @@ class HomeScreen(QWidget):
         service: TrackingService,
         paths: ApplicationPaths,
         parent: QWidget | None = None,
+        *,
+        open_tracker: Callable[[str], None] | None = None,
+        library_service: LibraryService | None = None,
     ) -> None:
         super().__init__(parent)
         self.service = service
         self.paths = paths
+        self.open_tracker = open_tracker
+        self.library_service = library_service or LibraryService(
+            service.database, paths.managed_library_root
+        )
 
         heading = QLabel("Question Tracker")
         heading.setObjectName("homeHeading")
@@ -40,16 +51,16 @@ class HomeScreen(QWidget):
         self.question_set_list.setObjectName("questionSetList")
         self.question_set_list.itemDoubleClicked.connect(self._open_item)
 
-        self.open_button = QPushButton("Set up / edit questions")
+        self.open_button = QPushButton("Open")
         self.open_button.setObjectName("openQuestionSetButton")
         self.open_button.clicked.connect(self.open_selected_question_set)
-        refresh_button = QPushButton("Refresh")
-        refresh_button.setObjectName("refreshHomeButton")
-        refresh_button.clicked.connect(self.refresh)
+        self.refresh_button = QPushButton("Refresh")
+        self.refresh_button.setObjectName("refreshHomeButton")
+        self.refresh_button.clicked.connect(self.refresh)
 
         button_row = QHBoxLayout()
         button_row.addWidget(self.open_button)
-        button_row.addWidget(refresh_button)
+        button_row.addWidget(self.refresh_button)
         button_row.addStretch()
 
         layout = QVBoxLayout(self)
@@ -62,6 +73,7 @@ class HomeScreen(QWidget):
         self.refresh()
 
     def refresh(self) -> None:
+        self.library_service.refresh()
         selected_id = self._selected_question_set_id()
         self.question_set_list.clear()
         selected_item: QListWidgetItem | None = None
@@ -86,6 +98,13 @@ class HomeScreen(QWidget):
     def open_selected_question_set(self) -> None:
         question_set_id = self._selected_question_set_id()
         if question_set_id is None:
+            return
+        question_set = self.service.get_question_set(question_set_id)
+        if (
+            question_set.setup_state is SetupState.READY
+            and self.open_tracker is not None
+        ):
+            self.open_tracker(question_set_id)
             return
         editor = QuestionEditorDialog(self.service, question_set_id, self)
         editor.exec()

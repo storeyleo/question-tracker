@@ -30,6 +30,9 @@ class NoteConflictPolicy(str, Enum):
     COMBINE = "combine"
 
 
+DEFAULT_TOPIC_COLOUR = "#D9EAF7"
+
+
 @dataclass(frozen=True, slots=True)
 class QuestionSet:
     id: str
@@ -37,6 +40,7 @@ class QuestionSet:
     display_name: str
     setup_state: SetupState
     general_note: str = ""
+    display_order: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +49,7 @@ class Topic:
     question_set_id: str
     title: str
     sort_order: int
+    colour: str = DEFAULT_TOPIC_COLOUR
 
 
 @dataclass(frozen=True, slots=True)

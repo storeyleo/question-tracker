@@ -44,13 +44,17 @@ def test_database_initialization_creates_schema(
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             )
         }
-        migration = connection.execute(
-            "SELECT version, name FROM schema_migrations"
-        ).fetchone()
+        migrations = connection.execute(
+            "SELECT version, name FROM schema_migrations ORDER BY version"
+        ).fetchall()
         foreign_keys = connection.execute("PRAGMA foreign_keys").fetchone()[0]
 
     assert EXPECTED_TABLES <= tables
-    assert dict(migration) == {"version": 1, "name": "001_initial.sql"}
+    assert [dict(migration) for migration in migrations] == [
+        {"version": 1, "name": "001_initial.sql"},
+        {"version": 2, "name": "002_question_set_order.sql"},
+        {"version": 3, "name": "003_topic_colour.sql"},
+    ]
     assert foreign_keys == 1
 
 
@@ -67,5 +71,4 @@ def test_database_initialization_is_idempotent(
             "SELECT count(*) FROM schema_migrations"
         ).fetchone()[0]
 
-    assert migration_count == 1
-
+    assert migration_count == 3

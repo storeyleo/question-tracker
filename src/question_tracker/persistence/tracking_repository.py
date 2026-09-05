@@ -73,6 +73,12 @@ class TrackingRepository:
             (name, now, question_set_id),
         )
 
+    def update_question_set_order(self, question_set_id: str, position: int) -> None:
+        self.connection.execute(
+            "UPDATE question_sets SET display_order = ? WHERE id = ?",
+            (position, question_set_id),
+        )
+
     def update_question_set_state(
         self, question_set_id: str, state: SetupState, now: str
     ) -> None:
@@ -165,10 +171,16 @@ class TrackingRepository:
     def insert_topic(self, topic: Topic) -> None:
         self.connection.execute(
             """
-            INSERT INTO topics (id, question_set_id, title, sort_order)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO topics (id, question_set_id, title, sort_order, colour)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (topic.id, topic.question_set_id, topic.title, topic.sort_order),
+            (
+                topic.id,
+                topic.question_set_id,
+                topic.title,
+                topic.sort_order,
+                topic.colour,
+            ),
         )
 
     def get_topic(self, topic_id: str) -> Topic | None:
@@ -196,6 +208,11 @@ class TrackingRepository:
     def update_topic_order(self, topic_id: str, sort_order: int) -> None:
         self.connection.execute(
             "UPDATE topics SET sort_order = ? WHERE id = ?", (sort_order, topic_id)
+        )
+
+    def update_topic_colour(self, topic_id: str, colour: str) -> None:
+        self.connection.execute(
+            "UPDATE topics SET colour = ? WHERE id = ?", (colour, topic_id)
         )
 
     def delete_topic(self, topic_id: str) -> None:
@@ -325,6 +342,23 @@ class TrackingRepository:
     def delete_attempt(self, attempt_id: str) -> None:
         self.connection.execute("DELETE FROM attempts WHERE id = ?", (attempt_id,))
 
+    def delete_attempts_for_set(self, question_set_id: str) -> None:
+        self.connection.execute(
+            """
+            DELETE FROM attempts
+            WHERE question_id IN (
+                SELECT id FROM questions WHERE question_set_id = ?
+            )
+            """,
+            (question_set_id,),
+        )
+
+    def delete_questions_for_set(self, question_set_id: str) -> None:
+        self.connection.execute(
+            "DELETE FROM questions WHERE question_set_id = ?",
+            (question_set_id,),
+        )
+
     def transfer_attempts(
         self, source_ids: tuple[str, ...], target_id: str, updated_at: str
     ) -> None:
@@ -360,6 +394,7 @@ def _question_set_from_row(row: sqlite3.Row) -> QuestionSet:
         display_name=row["display_name"],
         setup_state=SetupState(row["setup_state"]),
         general_note=row["general_note"],
+        display_order=row["display_order"],
     )
 
 
@@ -369,6 +404,7 @@ def _topic_from_row(row: sqlite3.Row) -> Topic:
         question_set_id=row["question_set_id"],
         title=row["title"],
         sort_order=row["sort_order"],
+        colour=row["colour"],
     )
 
 
