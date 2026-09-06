@@ -35,6 +35,11 @@ from PySide6.QtWidgets import (
 )
 
 from question_tracker.application.library_service import LibraryService
+from question_tracker.application.tracker_appearance import (
+    DEFAULT_APPEARANCE,
+    TrackerAppearance,
+    load_tracker_appearance,
+)
 from question_tracker.application.tracker_view import (
     ModuleTrackerSnapshot,
     QuestionColumn,
@@ -97,22 +102,31 @@ DEFAULT_ZOOM_PERCENT = 60
 
 @dataclass(frozen=True, slots=True)
 class TrackerMetrics:
-    cell_width: int = 78
+    appearance: TrackerAppearance = DEFAULT_APPEARANCE
     cell_margin: int = 3
-    stack_width: int = 70
-    attempt_box_size: int = 50
     stack_margin: int = 4
-    attempt_offset_x: int = 4
-    attempt_offset_y: int = 4
     attempt_max_x_steps: int = 4
-    heading_line_thickness: int = 1
-    heading_text_size: int = 10
     heading_row_height: int = 20
     topic_row_height: int = 20
-    horizontal_spacing: int = 4
     vertical_spacing: int = 2
     topic_spacing: int = 2
     section_padding: int = 10
+
+    @property
+    def stack_width(self) -> int:
+        return (
+            self.appearance.question_box_size + self.stack_margin
+            + self.attempt_max_x_steps * self.appearance.attempt_stack_offset
+        )
+
+    @property
+    def cell_width(self) -> int:
+        # Preserve the baseline's eight pixels around the stack.
+        return self.stack_width + 8
+
+    @property
+    def horizontal_spacing(self) -> int:
+        return self.appearance.horizontal_question_spacing
 
 
 TRACKER_METRICS = TrackerMetrics()
@@ -138,13 +152,15 @@ class AttemptStackWidget(QWidget):
         column: QuestionColumn,
         scale: float = 1.0,
         parent: QWidget | None = None,
+        *,
+        appearance: TrackerAppearance = DEFAULT_APPEARANCE,
     ) -> None:
         super().__init__(parent)
         self.setObjectName(f"attemptStack-{column.question.id}")
-        metrics = TRACKER_METRICS
+        metrics = TrackerMetrics(appearance)
         stack_height = (
-            metrics.attempt_box_size + metrics.stack_margin * 2
-            + max(0, len(column.attempts) - 1) * metrics.attempt_offset_y
+            appearance.question_box_size + metrics.stack_margin * 2
+            + max(0, len(column.attempts) - 1) * appearance.attempt_stack_offset
         )
         self.setFixedSize(_scaled(metrics.stack_width, scale), _scaled(stack_height, scale))
         if not column.attempts:
@@ -154,8 +170,8 @@ class AttemptStackWidget(QWidget):
             empty.setGeometry(
                 _scaled(metrics.stack_margin, scale),
                 _scaled(metrics.stack_margin, scale),
-                _scaled(metrics.attempt_box_size, scale),
-                _scaled(metrics.attempt_box_size, scale),
+                _scaled(appearance.question_box_size, scale),
+                _scaled(appearance.question_box_size, scale),
             )
             empty.setStyleSheet(
                 "background: white; border: 1px solid #999; color: #555;"
@@ -166,8 +182,8 @@ class AttemptStackWidget(QWidget):
         for index, attempt_view in enumerate(column.attempts):
             attempt = attempt_view.attempt
             style = ATTEMPT_STYLES[attempt.status]
-            horizontal_offset = min(index, metrics.attempt_max_x_steps) * metrics.attempt_offset_x
-            vertical_offset = index * metrics.attempt_offset_y
+            horizontal_offset = min(index, metrics.attempt_max_x_steps) * appearance.attempt_stack_offset
+            vertical_offset = index * appearance.attempt_stack_offset
             button = QPushButton("", self)
             button.setAccessibleName(style.label)
             button.setObjectName(f"attemptButton-{attempt.id}")
@@ -175,8 +191,8 @@ class AttemptStackWidget(QWidget):
             button.setGeometry(
                 _scaled(metrics.stack_margin + horizontal_offset, scale),
                 _scaled(metrics.stack_margin + vertical_offset, scale),
-                _scaled(metrics.attempt_box_size, scale),
-                _scaled(metrics.attempt_box_size, scale),
+                _scaled(appearance.question_box_size, scale),
+                _scaled(appearance.question_box_size, scale),
             )
             border_width = 3 if attempt_view.is_latest else 1
             button.setStyleSheet(
@@ -202,11 +218,13 @@ class QuestionCell(QFrame):
         column: QuestionColumn,
         scale: float = 1.0,
         parent: QWidget | None = None,
+        *,
+        appearance: TrackerAppearance = DEFAULT_APPEARANCE,
     ) -> None:
         super().__init__(parent)
         self.column = column
         self.setObjectName(f"questionCell-{column.question.id}")
-        self.setFixedWidth(_scaled(TRACKER_METRICS.cell_width, scale))
+        self.setFixedWidth(_scaled(TrackerMetrics(appearance).cell_width, scale))
 
         # Retain the programmatic history action without rendering a leaf label;
         # visible labels live exclusively in the two hierarchy heading rows.
@@ -225,7 +243,7 @@ class QuestionCell(QFrame):
         )
         self.label_button.hide()
 
-        self.attempt_stack = AttemptStackWidget(column, scale)
+        self.attempt_stack = AttemptStackWidget(column, scale, appearance=appearance)
         self.attempt_stack.attempt_clicked.connect(
             lambda attempt_id: self.attempt_requested.emit(
                 column.question.id, attempt_id
@@ -569,6 +587,7 @@ class TrackerScreen(QWidget):
         self.status_buttons: dict[AttemptStatus, QPushButton] = {}
         self._shortcuts: list[QShortcut] = []
         self.zoom_percent = DEFAULT_ZOOM_PERCENT
+        self.appearance = load_tracker_appearance()
         self._scroll_revision = 0
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
@@ -914,8 +933,8 @@ class TrackerScreen(QWidget):
         grid = QGridLayout(content)
         grid.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         scale = self.zoom_percent / 100
-        metrics = TRACKER_METRICS
-        grid.setHorizontalSpacing(_scaled(metrics.horizontal_spacing, scale))
+        metrics = TrackerMetrics(self.appearance)
+        grid.setHorizontalSpacing(max(0, round(metrics.horizontal_spacing * scale)))
         grid.setVerticalSpacing(_scaled(metrics.vertical_spacing, scale))
         widest_set = max(
             (len(item.columns) for item in snapshot.question_sets), default=1
@@ -964,7 +983,7 @@ class TrackerScreen(QWidget):
                 label.setStyleSheet(
                     f"color: {contrasting_text_colour(span.topic.colour)}; "
                     f"background: {span.topic.colour}; "
-                    f"border-bottom: {_scaled(metrics.heading_line_thickness, scale)}px "
+                    f"border-bottom: {_scaled(DEFAULT_APPEARANCE.hierarchy_line_thickness, scale)}px "
                     "solid #6f7780; font-weight: bold; padding: 0px 4px;"
                 )
                 grid.addWidget(
@@ -999,8 +1018,8 @@ class TrackerScreen(QWidget):
                     Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
                 )
                 label.setStyleSheet(
-                    f"border-bottom: {_scaled(metrics.heading_line_thickness, scale)}px "
-                    f"solid #91a4b7; font-size: {_scaled(metrics.heading_text_size, scale)}px; "
+                    f"border-bottom: {_scaled(self.appearance.hierarchy_line_thickness, scale)}px "
+                    f"solid #91a4b7; font-size: {_scaled(self.appearance.hierarchy_heading_text_size, scale)}px; "
                     "font-weight: normal; padding: 0px 3px;"
                 )
                 grid.addWidget(
@@ -1015,7 +1034,7 @@ class TrackerScreen(QWidget):
 
             attempt_row = heading_start_row + question_set_snapshot.heading_row_count
             for index, column in enumerate(question_set_snapshot.columns):
-                cell = QuestionCell(column, scale)
+                cell = QuestionCell(column, scale, appearance=self.appearance)
                 cell.selected.connect(self.select_question)
                 cell.attempt_requested.connect(self._attempt_requested)
                 cell.details_requested.connect(self._open_question_attempts)
