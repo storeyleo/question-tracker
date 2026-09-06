@@ -119,9 +119,9 @@ def test_tracker_consumes_settings_and_shared_cells_keep_defaults(
     assert buttons[0].width() == buttons[0].height() == scaled(appearance.question_box_size)
     assert buttons[0].x() == buttons[0].y() == scaled(4)
     assert buttons[1].x() == buttons[1].y() == scaled(4 + appearance.attempt_stack_offset)
-    heading_style = screen.hierarchy_headings[question.id].styleSheet()
-    assert f"font-size: {scaled(appearance.hierarchy_heading_text_size)}px" in heading_style
-    assert f"border-bottom: {scaled(appearance.hierarchy_line_thickness)}px" in heading_style
+    heading = screen.hierarchy_headings[question.id]
+    assert heading.font().pixelSize() == scaled(appearance.hierarchy_heading_text_size)
+    assert heading.line_thickness == scaled(appearance.hierarchy_line_thickness)
 
     # Marking constructs these shared cells without an appearance argument.
     compact_cell = QuestionCell(cell.column, 0.65)

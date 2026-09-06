@@ -4,8 +4,8 @@ from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from PySide6.QtCore import QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QDrag, QKeySequence, QShortcut, QUndoStack
+from PySide6.QtCore import QRect, QTimer, Qt, Signal
+from PySide6.QtGui import QColor, QDrag, QKeySequence, QPainter, QPen, QShortcut, QUndoStack
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractSpinBox,
@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -134,6 +135,56 @@ TRACKER_METRICS = TrackerMetrics()
 
 def _scaled(value: int, scale: float) -> int:
     return max(1, round(value * scale))
+
+
+class HierarchyHeadingLabel(QLabel):
+    """Main-tracker heading; its grid span, never its text, determines width."""
+
+    def __init__(self, text: str, appearance: TrackerAppearance, scale: float) -> None:
+        super().__init__(text)
+        self._leaf_span: tuple[QWidget, QWidget] | None = None
+        metrics = TrackerMetrics(appearance)
+        self.line_thickness = _scaled(appearance.hierarchy_line_thickness, scale)
+        self._label_gap = _scaled(metrics.cell_margin, scale)
+        font = self.font()
+        font.setPixelSize(_scaled(appearance.hierarchy_heading_text_size, scale))
+        font.setBold(False)
+        self.setFont(font)
+        self.setFixedHeight(_scaled(metrics.heading_row_height, scale))
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+
+    def set_leaf_span(self, first: QWidget, last: QWidget) -> None:
+        self._leaf_span = (first, last)
+        self.update()
+
+    def visible_span_rect(self) -> QRect:
+        """Paint bounds in heading coordinates, excluding allocated grid slack."""
+        if self._leaf_span is None:
+            return QRect()
+        first, last = self._leaf_span
+        # Headings and question cells are siblings in the same grid container.
+        left = first.geometry().left() - self.geometry().left()
+        right = last.geometry().right() - self.geometry().left()
+        return QRect(left, 0, right - left + 1, self.height()).intersected(self.contentsRect())
+
+    def paintEvent(self, event) -> None:
+        rect = self.visible_span_rect()
+        if rect.isEmpty():
+            return
+        painter = QPainter(self)
+        # Clip pen caps/thickness as well as text to the descendant edges.
+        painter.setClipRect(rect)
+        painter.setFont(self.font())
+        colour = self.palette().color(self.foregroundRole())
+        painter.setPen(colour)
+        text = self.fontMetrics().elidedText(
+            self.text(), Qt.TextElideMode.ElideRight, rect.width()
+        )
+        painter.drawText(rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, text)
+        line_start = rect.left() + self.fontMetrics().horizontalAdvance(text) + self._label_gap
+        if line_start < rect.right():
+            painter.setPen(QPen(colour, self.line_thickness))
+            painter.drawLine(line_start, rect.center().y(), rect.right(), rect.center().y())
 
 
 def attempt_tooltip(attempt: Attempt) -> str:
@@ -582,7 +633,7 @@ class TrackerScreen(QWidget):
         self.snapshot: TrackerSnapshot | None = None
         self.module_snapshot: ModuleTrackerSnapshot | None = None
         self.question_cells: dict[str, QuestionCell] = {}
-        self.hierarchy_headings: dict[str, QLabel] = {}
+        self.hierarchy_headings: dict[str, HierarchyHeadingLabel] = {}
         self.question_set_by_question: dict[str, str] = {}
         self.status_buttons: dict[AttemptStatus, QPushButton] = {}
         self._shortcuts: list[QShortcut] = []
@@ -1006,22 +1057,13 @@ class TrackerScreen(QWidget):
                     _scaled(metrics.heading_row_height, scale),
                 )
             for span in question_set_snapshot.hierarchy_headings:
-                label = QLabel(span.question.local_label)
+                label = HierarchyHeadingLabel(span.question.local_label, self.appearance, scale)
                 label.setObjectName(
                     f"hierarchyHeading-{span.question.id}"
                     if span.is_leaf
                     else f"parentSpan-{span.question.id}"
                 )
                 label.setToolTip(span.visible_label)
-                label.setFixedHeight(_scaled(metrics.heading_row_height, scale))
-                label.setAlignment(
-                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-                )
-                label.setStyleSheet(
-                    f"border-bottom: {_scaled(self.appearance.hierarchy_line_thickness, scale)}px "
-                    f"solid #91a4b7; font-size: {_scaled(self.appearance.hierarchy_heading_text_size, scale)}px; "
-                    "font-weight: normal; padding: 0px 3px;"
-                )
                 grid.addWidget(
                     label,
                     heading_start_row + span.depth,
@@ -1050,6 +1092,11 @@ class TrackerScreen(QWidget):
                 self.question_cells[column.question.id] = cell
                 self.question_set_by_question[column.question.id] = (
                     question_set_snapshot.question_set.id
+                )
+            for span in question_set_snapshot.hierarchy_headings:
+                self.hierarchy_headings[span.question.id].set_leaf_span(
+                    self.question_cells[question_set_snapshot.columns[span.start_column].question.id],
+                    self.question_cells[question_set_snapshot.columns[span.end_column].question.id],
                 )
             if not question_set_snapshot.columns:
                 empty = QLabel("This ready question set has no leaf questions.")
