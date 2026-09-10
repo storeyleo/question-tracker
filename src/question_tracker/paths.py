@@ -15,6 +15,10 @@ class ApplicationPaths:
     def database_path(self) -> Path:
         return self.data_dir / "question-tracker.db"
 
+    @property
+    def backups_dir(self) -> Path:
+        return self.data_dir / "backups"
+
     @classmethod
     def default(cls) -> ApplicationPaths:
         # Imported lazily so domain and persistence tests do not require Qt.
@@ -46,4 +50,3 @@ class ApplicationPaths:
     def ensure_created(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.managed_library_root.mkdir(parents=True, exist_ok=True)
-
