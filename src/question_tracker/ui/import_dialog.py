@@ -118,7 +118,11 @@ class ImportPdfDialog(QDialog):
         selected_year: str | None = None,
         selected_module: str | None = None,
     ) -> None:
-        result = self.library_service.refresh()
+        try:
+            result = self.library_service.refresh()
+        except LibraryError as error:
+            QMessageBox.warning(self, "Refresh Library", str(error))
+            return
         self._modules = result.modules
         current_year = selected_year or self.year_combo.currentText()
         self.year_combo.blockSignals(True)
@@ -195,12 +199,21 @@ class ImportPdfDialog(QDialog):
                 destination_name=self.destination_name_edit.text(),
             )
         except DestinationConflictError as error:
-            QMessageBox.warning(
-                self,
-                "File already exists",
-                f"{error}\n\nChoose another destination filename or cancel.",
-            )
-            return
+            if error.file_id is None:
+                QMessageBox.warning(self, "File already exists", str(error))
+                return
+            if QMessageBox.question(
+                self, "Replace existing PDF?",
+                f"{error}\n\nReplace its contents and keep the existing questions and tracking?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            ) != QMessageBox.StandardButton.Yes:
+                return
+            try:
+                self.imported_file = self.library_service.replace_file(error.file_id, Path(source_text))
+            except LibraryError as replacement_error:
+                QMessageBox.warning(self, "Replace PDF", str(replacement_error))
+                return
         except LibraryError as error:
             QMessageBox.warning(self, "Add PDF", str(error))
             return

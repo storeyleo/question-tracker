@@ -43,6 +43,7 @@ class ManagedFile:
     availability: FileAvailability
     size_bytes: int | None
     modified_ns: int | None
+    sha256: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

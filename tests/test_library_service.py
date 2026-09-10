@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import hashlib
+import sqlite3
 from uuid import UUID
 
 import pytest
@@ -12,6 +14,7 @@ from question_tracker.application.library_service import (
     InvalidSourceError,
     InvalidTargetError,
     LibraryService,
+    LibraryError,
 )
 from question_tracker.application.tracking_service import TrackingService
 from question_tracker.domain.library import (
@@ -379,10 +382,12 @@ def test_manual_solution_associations_support_multiple_and_shared_solutions(
         library_service.associate_reference(first_set.id, second_main.id)
 
 
+@pytest.mark.parametrize("recovery", ("present", "missing", "exact_path"))
 def test_replace_present_pdf_preserves_uuid_association_and_tracking_history(
     library_service: LibraryService,
     tracking_service: TrackingService,
     application_paths: ApplicationPaths,
+    recovery: str,
 ) -> None:
     library_service.create_year("Year 1")
     library_service.create_module("Year 1", "Calculus")
@@ -398,15 +403,37 @@ def test_replace_present_pdf_preserves_uuid_association_and_tracking_history(
     topic = tracking_service.create_topic(question_set.id, "Integration")
     tracking_service.assign_topic(question.id, topic.id)
     attempt = tracking_service.add_attempt(question.id, AttemptStatus.PARTIAL)
+    tracking_service.finish_question_set_setup(question_set.id)
+    tracking_service.set_question_set_note(question_set.id, "Keep set note")
+    destination = library_service.path_for_file(managed_file.id)
+    if recovery != "present":
+        destination.unlink()
+        library_service.refresh()
+        assert library_service.get_file(managed_file.id).availability is FileAvailability.MISSING
+        assert tracking_service.get_attempt(attempt.id).question_id == question.id
     replacement_source = application_paths.data_dir / "Replacement.pdf"
-    replacement_content = write_pdf(replacement_source, b"new content")
+    replacement_content = write_pdf(replacement_source, b"new corrected content")
 
-    replaced = library_service.replace_file(managed_file.id, replacement_source)
+    if recovery == "exact_path":
+        destination.write_bytes(replacement_content)
+        result = library_service.refresh()
+        assert [file.id for file in result.reappeared_files] == [managed_file.id]
+        replaced = library_service.get_file(managed_file.id)
+    else:
+        replaced = library_service.replace_file(managed_file.id, replacement_source)
 
     destination = application_paths.managed_library_root.joinpath(
         *managed_file.relative_path.parts
     )
     assert replaced.id == managed_file.id
+    assert replaced.sha256 == hashlib.sha256(replacement_content).hexdigest()
+    assert replaced.sha256 != managed_file.sha256
+    assert replaced.size_bytes == len(replacement_content)
+    assert replaced.modified_ns == destination.stat().st_mtime_ns
+    assert replacement_source.read_bytes() == replacement_content
+    assert len(library_service.list_files()) == 1
+    assert question_set_for_main(library_service, replaced.id).setup_state is SetupState.READY
+    assert question_set_for_main(library_service, replaced.id).general_note == "Keep set note"
     assert destination.read_bytes() == replacement_content
     assert question_set_for_main(library_service, replaced.id).id == question_set.id
     preserved_question = tracking_service.get_question(question.id)
@@ -414,6 +441,58 @@ def test_replace_present_pdf_preserves_uuid_association_and_tracking_history(
     assert preserved_question.bookmarked is True
     assert tracking_service.topic_ids_for_question(question.id) == (topic.id,)
     assert tracking_service.get_attempt(attempt.id).question_id == question.id
+
+
+@pytest.mark.parametrize("same_filename", (False, True))
+def test_repeated_replacement_a_b_a_b_preserves_logical_slot(
+    library_service, tracking_service, application_paths, same_filename,
+):
+    library_service.create_year("Year 1")
+    library_service.create_module("Year 1", "Calculus")
+    source_a = application_paths.data_dir / "original" / "A.pdf"
+    source_b = application_paths.data_dir / "corrected" / (
+        "A.pdf" if same_filename else "B.pdf"
+    )
+    contents_a = write_pdf(source_a, b"original A")
+    contents_b = write_pdf(source_b, b"corrected version B")
+    managed = library_service.import_pdf(
+        source_a, "Year 1", "Calculus", DocumentType.PROBLEM_SHEET,
+    )
+    question_set = question_set_for_main(library_service, managed.id)
+    question = tracking_service.create_question(question_set.id, "1")
+    tracking_service.set_question_note(question.id, "Question note")
+    tracking_service.toggle_question_bookmark(question.id)
+    topic = tracking_service.create_topic(question_set.id, "Integration")
+    tracking_service.assign_topic(question.id, topic.id)
+    attempt = tracking_service.add_attempt(question.id, AttemptStatus.PARTIAL)
+    tracking_service.set_question_set_note(question_set.id, "Set note")
+    tracking_service.finish_question_set_setup(question_set.id)
+    saved_set = tracking_service.get_question_set(question_set.id)
+    saved_question = tracking_service.get_question(question.id)
+    destination = library_service.path_for_file(managed.id)
+
+    # Reuse the original source path/hash, then reuse the replacement path/hash.
+    for source, expected in (
+        (source_b, contents_b), (source_a, contents_a), (source_b, contents_b),
+    ):
+        updated = library_service.replace_file(managed.id, source)
+        assert updated.id == managed.id
+        assert updated.relative_path == managed.relative_path
+        assert updated.availability is FileAvailability.PRESENT
+        assert destination.read_bytes() == expected
+        assert updated.sha256 == hashlib.sha256(expected).hexdigest()
+        assert updated.size_bytes == len(expected)
+        assert updated.modified_ns == destination.stat().st_mtime_ns
+        assert source_a.read_bytes() == contents_a
+        assert source_b.read_bytes() == contents_b
+        library_service.refresh()
+        assert library_service.list_files() == (updated,)
+        assert tracking_service.list_question_sets() == (saved_set,)
+        assert question_set_for_main(library_service, managed.id) == saved_set
+        assert tracking_service.list_questions(question_set.id) == (saved_question,)
+        assert tracking_service.get_attempt(attempt.id) == attempt
+        assert tracking_service.list_topics(question_set.id) == (topic,)
+        assert tracking_service.topic_ids_for_question(question.id) == (topic.id,)
 
 
 def test_replace_missing_pdf_preserves_uuid(
@@ -440,6 +519,90 @@ def test_replace_missing_pdf_preserves_uuid(
     assert replaced.id == managed_file.id
     assert replaced.availability is FileAvailability.PRESENT
     assert destination.read_bytes() == replacement_content
+
+
+@pytest.mark.parametrize("missing", (False, True))
+@pytest.mark.parametrize("failure", ("copy", "install", "database"))
+def test_failed_replacement_preserves_file_and_database(
+    library_service, application_paths, monkeypatch, missing, failure,
+):
+    import question_tracker.application.library_service as library_module
+    from question_tracker.persistence.library_repository import LibraryRepository
+
+    library_service.create_year("Year 1")
+    library_service.create_module("Year 1", "Algebra")
+    source = application_paths.data_dir / "Sheet.pdf"
+    original = write_pdf(source)
+    file = library_service.import_pdf(source, "Year 1", "Algebra", DocumentType.PROBLEM_SHEET)
+    destination = library_service.path_for_file(file.id)
+    if missing:
+        destination.unlink()
+        library_service.refresh()
+    before = library_service.get_file(file.id)
+    replacement = application_paths.data_dir / "New.pdf"
+    contents = write_pdf(replacement, b"corrected")
+
+    def fail(*args, **kwargs):
+        if failure == "database":
+            raise sqlite3.OperationalError("database write failed")
+        raise PermissionError("locked")
+
+    if failure == "copy":
+        monkeypatch.setattr(library_module.shutil, "copyfileobj", fail)
+    elif failure == "install":
+        monkeypatch.setattr(library_module.os, "replace", fail)
+    else:
+        monkeypatch.setattr(LibraryRepository, "mark_present", fail)
+    with pytest.raises(LibraryError):
+        library_service.replace_file(file.id, replacement)
+    assert library_service.get_file(file.id) == before
+    assert destination.exists() is not missing
+    if not missing:
+        assert destination.read_bytes() == original
+    assert replacement.read_bytes() == contents
+    assert not list(destination.parent.glob(".question-tracker-*.tmp"))
+
+
+def test_rename_is_new_identity_and_explicit_import_replacement_is_stable(
+    library_service, application_paths,
+):
+    library_service.create_year("Year 1")
+    library_service.create_module("Year 1", "Algebra")
+    source = application_paths.data_dir / "Sheet.pdf"
+    write_pdf(source)
+    file = library_service.import_pdf(source, "Year 1", "Algebra", DocumentType.PROBLEM_SHEET)
+    question_set = question_set_for_main(library_service, file.id)
+    path = library_service.path_for_file(file.id)
+    path.rename(path.with_name("Renamed.pdf"))
+    scan = library_service.refresh()
+    assert [item.id for item in scan.missing_files] == [file.id]
+    assert len(scan.new_files) == 1
+    assert scan.new_files[0].id != file.id
+    with pytest.raises(DestinationConflictError) as conflict:
+        library_service.import_pdf(source, "Year 1", "Algebra", DocumentType.PROBLEM_SHEET)
+    assert conflict.value.file_id == file.id
+    library_service.replace_file(conflict.value.file_id, source)
+    library_service.refresh()
+    assert len(library_service.list_files()) == 2
+    assert question_set_for_main(library_service, file.id).id == question_set.id
+
+
+def test_failed_refresh_does_not_mark_existing_files_missing(
+    library_service, application_paths, monkeypatch,
+):
+    import question_tracker.application.library_service as library_module
+
+    library_service.create_year("Year 1")
+    library_service.create_module("Year 1", "Algebra")
+    source = application_paths.data_dir / "Sheet.pdf"
+    write_pdf(source)
+    file = library_service.import_pdf(source, "Year 1", "Algebra", DocumentType.PROBLEM_SHEET)
+    def unreadable(*args):
+        raise PermissionError("Cannot read PDF")
+    monkeypatch.setattr(library_module, "_file_hash", unreadable)
+    with pytest.raises(LibraryError, match="scan"):
+        library_service.refresh()
+    assert library_service.get_file(file.id) == file
 
 
 def test_reset_questions_preserves_main_and_reference_pdf_associations(

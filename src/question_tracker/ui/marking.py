@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLayout,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -20,7 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from question_tracker.application.library_service import LibraryService
+from question_tracker.application.library_service import LibraryError, LibraryService
 from question_tracker.application.tracker_view import (
     TrackerSnapshot,
     adjacent_leaf_id,
@@ -530,7 +531,10 @@ class MarkingWorkspace(QWidget):
         self.setSizePolicy(
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding
         )
-        library_service.refresh()
+        try:
+            library_service.refresh()
+        except LibraryError as error:
+            QMessageBox.warning(self, "Refresh Library", str(error))
 
         back_button = QPushButton("Back to Home")
         back_button.setObjectName("markingBackButton")

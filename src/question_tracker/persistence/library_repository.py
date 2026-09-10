@@ -23,8 +23,8 @@ class LibraryRepository:
             INSERT INTO managed_files (
                 id, relative_path, path_key, document_type, availability,
                 size_bytes, modified_ns, first_seen_at_utc, last_seen_at_utc,
-                updated_at_utc
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                updated_at_utc, sha256
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 managed_file.id,
@@ -37,6 +37,7 @@ class LibraryRepository:
                 now,
                 now,
                 now,
+                managed_file.sha256,
             ),
         )
 
@@ -65,15 +66,16 @@ class LibraryRepository:
         size_bytes: int,
         modified_ns: int,
         now: str,
+        sha256: str | None = None,
     ) -> None:
         self.connection.execute(
             """
             UPDATE managed_files
             SET document_type = ?, availability = 'present', size_bytes = ?,
-                modified_ns = ?, last_seen_at_utc = ?, updated_at_utc = ?
+                modified_ns = ?, last_seen_at_utc = ?, updated_at_utc = ?, sha256 = ?
             WHERE id = ?
             """,
-            (document_type.value, size_bytes, modified_ns, now, now, file_id),
+            (document_type.value, size_bytes, modified_ns, now, now, sha256, file_id),
         )
 
     def mark_missing(self, file_id: str, now: str) -> None:
@@ -134,6 +136,13 @@ class LibraryRepository:
         ).fetchone()
         return row["next_order"]
 
+    def set_reference_order(self, question_set_id: str, file_id: str, order: int) -> None:
+        self.connection.execute(
+            "UPDATE question_set_files SET sort_order = ? "
+            "WHERE question_set_id = ? AND file_id = ? AND role = 'reference'",
+            (order, question_set_id, file_id),
+        )
+
     def file_ids_for_question_set(
         self, question_set_id: str, role: FileRole | None = None
     ) -> tuple[str, ...]:
@@ -189,4 +198,5 @@ def _managed_file_from_row(row: sqlite3.Row) -> ManagedFile:
         availability=FileAvailability(row["availability"]),
         size_bytes=row["size_bytes"],
         modified_ns=row["modified_ns"],
+        sha256=row["sha256"],
     )

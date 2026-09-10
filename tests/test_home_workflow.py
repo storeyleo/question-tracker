@@ -26,6 +26,7 @@ from question_tracker.ui.home import HomeScreen
 from question_tracker.ui.import_dialog import ImportPdfDialog
 from question_tracker.ui.marking import MarkingWorkspace
 from question_tracker.ui.question_editor import QuestionEditorDialog
+from question_tracker.ui.reference_dialog import ReferenceDialog
 
 
 def _create_module(library_service: LibraryService) -> None:
@@ -111,8 +112,10 @@ def test_import_conflict_is_visible_and_alternate_filename_succeeds(
     warnings: list[tuple[str, str]] = []
     monkeypatch.setattr(
         QMessageBox,
-        "warning",
-        lambda parent, title, message: warnings.append((title, message)),
+        "question",
+        lambda parent, title, message, *args: (
+            warnings.append((title, message)) or QMessageBox.StandardButton.Cancel
+        ),
     )
     dialog = ImportPdfDialog(library_service, DocumentType.PROBLEM_SHEET)
     qtbot.addWidget(dialog)
@@ -122,8 +125,8 @@ def test_import_conflict_is_visible_and_alternate_filename_succeeds(
     qtbot.mouseClick(dialog.import_button, Qt.MouseButton.LeftButton)
 
     assert dialog.result() != QDialog.DialogCode.Accepted
-    assert warnings and warnings[-1][0] == "File already exists"
-    assert "Choose another destination filename" in warnings[-1][1]
+    assert warnings and warnings[-1][0] == "Replace existing PDF?"
+    assert "keep the existing questions and tracking" in warnings[-1][1]
 
     dialog.destination_name_edit.setText("Sheet copy.pdf")
     qtbot.mouseClick(dialog.import_button, Qt.MouseButton.LeftButton)
@@ -635,6 +638,118 @@ def test_missing_file_replace_from_home_preserves_tracking_history(
 
     assert library_service.get_file(main.id).availability is FileAvailability.PRESENT
     assert tracking_service.attempts_for_question(question.id)[0].id == attempt.id
+
+
+@pytest.mark.parametrize("accept", (False, True))
+def test_present_home_replacement_requires_confirmation(
+    qtbot, monkeypatch, tracking_service, library_service, application_paths,
+    pdf_factory, accept,
+):
+    _create_module(library_service)
+    main = _import_main(library_service, application_paths, pdf_factory, "Sheet.pdf")
+    original = library_service.path_for_file(main.id).read_bytes()
+    replacement = pdf_factory(application_paths.data_dir / "Corrected.pdf")
+    replacement.write_bytes(replacement.read_bytes() + b"\n% corrected\n")
+    home = HomeScreen(tracking_service, application_paths, library_service=library_service)
+    qtbot.addWidget(home)
+    home.library_browser.setCurrentItem(home.library_browser.file_item(main.id))
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *args: (str(replacement), ""))
+    confirmations = []
+    def confirm(*args):
+        confirmations.append(args)
+        return QMessageBox.StandardButton.Yes if accept else QMessageBox.StandardButton.Cancel
+    monkeypatch.setattr(QMessageBox, "question", confirm)
+    home.quick_replace_button.click()
+    assert len(confirmations) == 1
+    assert library_service.path_for_file(main.id).read_bytes() == (
+        replacement.read_bytes() if accept else original
+    )
+    assert len(library_service.list_files()) == 1
+
+
+def test_home_replacement_from_managed_pdf_then_self_reports_no_original_copy(
+    qtbot, monkeypatch, tracking_service, library_service, application_paths, pdf_factory,
+):
+    _create_module(library_service)
+    main = _import_main(library_service, application_paths, pdf_factory, "A.pdf")
+    other = _import_main(library_service, application_paths, pdf_factory, "B.pdf")
+    destination = library_service.path_for_file(main.id)
+    source_b = library_service.path_for_file(other.id)
+    source_b.write_bytes(source_b.read_bytes() + b"\n% version B\n")
+    contents_b = source_b.read_bytes()
+    home = HomeScreen(tracking_service, application_paths, library_service=library_service)
+    qtbot.addWidget(home)
+    home.library_browser.setCurrentItem(home.library_browser.file_item(main.id))
+    selections = iter((source_b, destination))
+    monkeypatch.setattr(
+        QFileDialog, "getOpenFileName", lambda *args: (str(next(selections)), ""),
+    )
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.StandardButton.Yes)
+    warnings = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args: warnings.append(args[2]))
+
+    home.quick_replace_button.click()
+    assert destination.read_bytes() == contents_b
+    assert not warnings
+    before = library_service.get_file(main.id)
+    home.quick_replace_button.click()
+    assert len(warnings) == 1
+    assert "managed file itself" in warnings[0]
+    assert "separate copy" in warnings[0]
+    assert library_service.get_file(main.id) == before
+    assert source_b.read_bytes() == contents_b
+    assert len(library_service.list_files()) == 2
+    assert len(tracking_service.list_question_sets()) == 2
+
+
+def test_duplicate_import_can_explicitly_replace_without_new_set(
+    qtbot, monkeypatch, tracking_service, library_service, application_paths, pdf_factory,
+):
+    _create_module(library_service)
+    main = _import_main(library_service, application_paths, pdf_factory, "Sheet.pdf")
+    question_set = _question_set_for_main(library_service, main.id)
+    source = pdf_factory(application_paths.data_dir / "incoming" / "Sheet.pdf")
+    dialog = ImportPdfDialog(library_service, DocumentType.PROBLEM_SHEET)
+    qtbot.addWidget(dialog)
+    dialog.set_source_path(source)
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.StandardButton.Yes)
+    dialog.import_button.click()
+    assert dialog.result() == QDialog.DialogCode.Accepted
+    assert dialog.imported_file.id == main.id
+    assert [item.id for item in tracking_service.list_question_sets()] == [question_set.id]
+
+
+def test_home_reference_management_add_reorder_remove_keeps_files_and_tracking(
+    qtbot, monkeypatch, tracking_service, library_service, application_paths, pdf_factory,
+):
+    _create_module(library_service)
+    main = _import_main(library_service, application_paths, pdf_factory, "Sheet.pdf")
+    question_set = _question_set_for_main(library_service, main.id)
+    question = tracking_service.create_question(question_set.id, "1")
+    attempt = tracking_service.add_attempt(question.id, AttemptStatus.PARTIAL)
+    refs = [
+        _import_main(library_service, application_paths, pdf_factory, name, DocumentType.SOLUTION)
+        for name in ("Solution A.pdf", "Solution B.pdf")
+    ]
+    home = HomeScreen(tracking_service, application_paths, library_service=library_service)
+    qtbot.addWidget(home)
+    home.library_browser.setCurrentItem(home.library_browser.file_item(main.id))
+    opened = []
+    def edit(dialog):
+        opened.append(dialog.question_set_id)
+        for file in refs:
+            dialog.available.setCurrentIndex(dialog.available.findData(file.id))
+            dialog.add_button.click()
+        dialog.up_button.click()  # Most recently added reference is selected.
+        assert [file.id for file in library_service.files_for_question_set(question_set.id, FileRole.REFERENCE)] == [refs[1].id, refs[0].id]
+        dialog.remove_button.click()
+        return QDialog.DialogCode.Accepted
+    monkeypatch.setattr(ReferenceDialog, "exec", edit)
+    home.references_button.click()
+    assert opened == [question_set.id]
+    assert [file.id for file in library_service.files_for_question_set(question_set.id, FileRole.REFERENCE)] == [refs[0].id]
+    assert all(library_service.path_for_file(file.id).is_file() for file in refs)
+    assert tracking_service.get_attempt(attempt.id).question_id == question.id
 
 
 def test_solution_from_main_window_home_opens_in_marking_right_pane(

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import sqlite3
 import tempfile
+from contextlib import contextmanager
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -39,7 +42,9 @@ class InvalidSourceError(LibraryError):
 
 
 class DestinationConflictError(LibraryError):
-    pass
+    def __init__(self, message: str, file_id: str | None = None) -> None:
+        super().__init__(message)
+        self.file_id = file_id
 
 
 class InvalidTargetError(LibraryError):
@@ -65,6 +70,7 @@ class _DiscoveredPdf:
     document_type: DocumentType
     size_bytes: int
     modified_ns: int
+    sha256: str
 
 
 class LibraryService:
@@ -76,11 +82,11 @@ class LibraryService:
 
     def create_year(self, year_name: str) -> Path:
         name = _validate_folder_name(year_name)
-        self.root.mkdir(parents=True, exist_ok=True)
         destination = self._safe_path(name)
         if destination.exists():
             raise DestinationConflictError(f"Year folder already exists: {name}")
         try:
+            self.root.mkdir(parents=True, exist_ok=True)
             destination.mkdir()
         except OSError as error:
             raise LibraryError(f"Could not create year folder: {name}") from error
@@ -106,7 +112,10 @@ class LibraryService:
         return destination
 
     def scan_library(self) -> LibraryScanResult:
-        self.root.mkdir(parents=True, exist_ok=True)
+        try:
+            self.root.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            raise LibraryError("Could not access the managed library") from error
         years, modules, discovered = self._discover_filesystem()
         discovered_by_key = {item.path_key: item for item in discovered}
         if len(discovered_by_key) != len(discovered):
@@ -139,6 +148,7 @@ class LibraryService:
                     item.size_bytes,
                     item.modified_ns,
                     now,
+                    item.sha256,
                 )
 
             for known in known_files:
@@ -190,16 +200,22 @@ class LibraryService:
         except OSError as error:
             raise LibraryError(f"Could not create category folder: {category}") from error
         destination = self._safe_path(year, module, category, filename)
-        if destination.exists():
+        with self.database.read() as connection:
+            known = LibraryRepository(connection).get_file_by_path_key(
+                _path_key(PurePosixPath(destination.relative_to(self.root).as_posix()))
+            )
+        if destination.exists() or known is not None:
             raise DestinationConflictError(
-                f"A file named {filename!r} already exists in {module_path.name}"
+                f"A file named {filename!r} is already managed in {module_path.name}. "
+                "Refresh the library if it was added externally.",
+                known.id if known is not None else None,
             )
 
         _copy_new_file(source, destination)
         try:
             return self._register_present_file(destination, kind)
         except Exception:
-            destination.unlink(missing_ok=True)
+            _remove_temporary(destination)
             raise
 
     def replace_file(self, file_id: str, source_path: Path) -> ManagedFile:
@@ -211,24 +227,29 @@ class LibraryService:
 
         destination = self._path_from_relative(managed_file.relative_path)
         try:
+            if destination.exists() and source.samefile(destination):
+                raise InvalidSourceError(
+                    "The selected PDF is this managed file itself. Replace keeps its "
+                    "filename but overwrites its contents; it does not keep earlier versions. "
+                    "Select a separate copy containing the version you want to restore."
+                )
             destination.parent.mkdir(parents=True, exist_ok=True)
         except OSError as error:
-            raise LibraryError("Could not recreate the managed file folder") from error
-        _copy_atomic_replace(source, destination)
-        stat = destination.stat()
-        now = _time_text()
-        with self.database.transaction() as connection:
-            repository = LibraryRepository(connection)
-            if repository.get_file(file_id) is None:
-                raise ManagedFileNotFoundError(f"Managed file not found: {file_id}")
-            repository.mark_present(
-                file_id,
-                managed_file.document_type,
-                stat.st_size,
-                stat.st_mtime_ns,
-                now,
-            )
-            updated = repository.get_file(file_id)
+            raise LibraryError("Could not access or recreate the managed file destination") from error
+        # Restore the old contents if the database update/commit fails.
+        try:
+            with _copy_atomic_replace(source, destination) as (stat, digest):
+                with self.database.transaction() as connection:
+                    repository = LibraryRepository(connection)
+                    repository.mark_present(
+                        file_id, managed_file.document_type,
+                        stat.st_size, stat.st_mtime_ns, _time_text(), digest,
+                    )
+                    updated = repository.get_file(file_id)
+                    if updated is None:
+                        raise ManagedFileNotFoundError(f"Managed file not found: {file_id}")
+        except sqlite3.Error as error:
+            raise LibraryError("Could not save the replacement PDF metadata") from error
         assert updated is not None
         return updated
 
@@ -245,9 +266,9 @@ class LibraryService:
 
     def list_folders(self) -> tuple[PurePosixPath, ...]:
         """List current managed-library folders as paths relative to the root."""
-        self.root.mkdir(parents=True, exist_ok=True)
         folders: list[PurePosixPath] = []
         try:
+            self.root.mkdir(parents=True, exist_ok=True)
             for path in self.root.rglob("*"):
                 if not path.is_dir():
                     continue
@@ -357,6 +378,17 @@ class LibraryService:
             if role is not FileRole.REFERENCE:
                 raise AssociationError("The main PDF cannot be removed as a reference")
             repository.remove_association(question_set_id, file_id)
+
+    def reorder_reference(self, question_set_id: str, file_id: str, new_index: int) -> None:
+        with self.database.transaction() as connection:
+            repository = LibraryRepository(connection)
+            ids = list(repository.file_ids_for_question_set(question_set_id, FileRole.REFERENCE))
+            if file_id not in ids or not 0 <= new_index < len(ids):
+                raise AssociationError("Invalid reference position")
+            ids.remove(file_id)
+            ids.insert(new_index, file_id)
+            for order, reference_id in enumerate(ids):
+                repository.set_reference_order(question_set_id, reference_id, order)
 
     def associate_main_file(self, question_set_id: str, file_id: str) -> None:
         with self.database.transaction() as connection:
@@ -475,6 +507,7 @@ class LibraryService:
                                     document_type=document_type,
                                     size_bytes=stat.st_size,
                                     modified_ns=stat.st_mtime_ns,
+                                    sha256=_file_hash(pdf_path),
                                 )
                             )
         except OSError as error:
@@ -486,13 +519,18 @@ class LibraryService:
     ) -> ManagedFile:
         self._ensure_inside_root(path)
         relative = PurePosixPath(path.relative_to(self.root).as_posix())
-        stat = path.stat()
+        try:
+            stat = path.stat()
+            digest = _file_hash(path)
+        except OSError as error:
+            raise LibraryError("Could not read managed PDF metadata") from error
         discovered = _DiscoveredPdf(
             relative_path=relative,
             path_key=_path_key(relative),
             document_type=document_type,
             size_bytes=stat.st_size,
             modified_ns=stat.st_mtime_ns,
+            sha256=digest,
         )
         now = _time_text()
         with self.database.transaction() as connection:
@@ -508,6 +546,7 @@ class LibraryService:
                 stat.st_size,
                 stat.st_mtime_ns,
                 now,
+                digest,
             )
             updated = repository.get_file(existing.id)
             assert updated is not None
@@ -527,6 +566,7 @@ class LibraryService:
             availability=FileAvailability.PRESENT,
             size_bytes=discovered.size_bytes,
             modified_ns=discovered.modified_ns,
+            sha256=discovered.sha256,
         )
         repository.insert_file(managed_file, discovered.path_key, now)
         if discovered.document_type is not DocumentType.SOLUTION:
@@ -595,11 +635,11 @@ def _validate_folder_name(value: str) -> str:
 
 def _validate_pdf_source(source_path: Path) -> Path:
     source = Path(source_path)
-    if not source.exists() or not source.is_file():
-        raise InvalidSourceError(f"Source file does not exist: {source}")
     if source.suffix.casefold() != ".pdf":
         raise InvalidSourceError("Source file must have a .pdf extension")
     try:
+        if not source.is_file():
+            raise InvalidSourceError(f"Source file does not exist: {source}")
         with source.open("rb") as stream:
             header = stream.read(1024)
     except OSError as error:
@@ -627,8 +667,10 @@ def _document_type(value: DocumentType | str) -> DocumentType:
 
 
 def _copy_new_file(source: Path, destination: Path) -> None:
+    created = False
     try:
         with source.open("rb") as source_stream, destination.open("xb") as target_stream:
+            created = True
             shutil.copyfileobj(source_stream, target_stream)
             target_stream.flush()
             os.fsync(target_stream.fileno())
@@ -637,30 +679,68 @@ def _copy_new_file(source: Path, destination: Path) -> None:
             f"Destination file already exists: {destination.name}"
         ) from error
     except OSError as error:
-        destination.unlink(missing_ok=True)
+        if created:
+            _remove_temporary(destination)
         raise LibraryError(f"Could not copy PDF: {source.name}") from error
 
 
-def _copy_atomic_replace(source: Path, destination: Path) -> None:
+@contextmanager
+def _copy_atomic_replace(
+    source: Path, destination: Path,
+) -> Iterator[tuple[os.stat_result, str]]:
     temporary_path: Path | None = None
+    backup_path: Path | None = None
+    keep_backup = False
     try:
         descriptor, temporary_name = tempfile.mkstemp(
             prefix=".question-tracker-", suffix=".tmp", dir=destination.parent
         )
         temporary_path = Path(temporary_name)
-        with source.open("rb") as source_stream, os.fdopen(
-            descriptor, "wb"
-        ) as target_stream:
+        with os.fdopen(descriptor, "wb") as target_stream, source.open("rb") as source_stream:
             shutil.copyfileobj(source_stream, target_stream)
             target_stream.flush()
             os.fsync(target_stream.fileno())
+        stat = temporary_path.stat()
+        digest = _file_hash(temporary_path)
+        if destination.exists():
+            backup_descriptor, backup_name = tempfile.mkstemp(
+                prefix=".question-tracker-backup-", suffix=".tmp", dir=destination.parent
+            )
+            os.close(backup_descriptor)
+            backup_path = Path(backup_name)
+            shutil.copy2(destination, backup_path)
         os.replace(temporary_path, destination)
         temporary_path = None
+        try:
+            yield stat, digest
+        except Exception:
+            if backup_path is not None:
+                keep_backup = True
+                os.replace(backup_path, destination)
+                backup_path = None
+            else:
+                destination.unlink()
+            raise
     except OSError as error:
         raise LibraryError(f"Could not replace PDF: {destination.name}") from error
     finally:
         if temporary_path is not None:
-            temporary_path.unlink(missing_ok=True)
+            _remove_temporary(temporary_path)
+        # Retain a backup if rollback itself failed, so the original is recoverable.
+        if backup_path is not None and not keep_backup:
+            _remove_temporary(backup_path)
+
+
+def _remove_temporary(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass  # Do not mask the original error with a temporary-file cleanup failure.
+
+
+def _file_hash(path: Path) -> str:
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
 def _path_key(relative_path: PurePosixPath) -> str:

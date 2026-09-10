@@ -183,6 +183,30 @@ def test_multiple_references_are_highlighted_but_not_arbitrarily_opened(
         assert f"Associated \u2014 {reference.relative_path.name}" in browser_text
 
 
+def test_missing_main_keeps_tracking_and_removing_reference_allows_single_auto_open(
+    qtbot, tracking_service, library_service, application_paths, pdf_factory,
+):
+    from question_tracker.domain.library import FileAvailability
+
+    question_set, leaves, main, refs = _create_ready_managed_set(
+        tracking_service, library_service, application_paths, pdf_factory,
+        references=("Solution A", "Solution B"),
+    )
+    library_service.path_for_file(main.id).unlink()
+    library_service.refresh()
+    library_service.remove_reference(question_set.id, refs[1].id)
+    workspace = _workspace(
+        qtbot, tracking_service, library_service, question_set_id=question_set.id,
+    )
+    assert library_service.get_file(main.id).availability is FileAvailability.MISSING
+    assert "missing" in workspace.left_pane.document_state_label.text().lower()
+    assert workspace.right_pane.current_file_id == refs[0].id
+    assert library_service.path_for_file(refs[1].id).is_file()
+    assert workspace.compact_tracker.active_question_set_id == question_set.id
+    workspace.compact_tracker.mark_selected(AttemptStatus.PARTIAL, advance=False)
+    assert tracking_service.attempts_for_question(leaves[0].id)[0].status is AttemptStatus.PARTIAL
+
+
 def test_keyboard_marking_navigation_and_auto_advance(
     qtbot,
     tracking_service: TrackingService,

@@ -54,6 +54,7 @@ def test_database_initialization_creates_schema(
         {"version": 1, "name": "001_initial.sql"},
         {"version": 2, "name": "002_question_set_order.sql"},
         {"version": 3, "name": "003_topic_colour.sql"},
+        {"version": 4, "name": "004_file_hash.sql"},
     ]
     assert foreign_keys == 1
 
@@ -71,4 +72,4 @@ def test_database_initialization_is_idempotent(
             "SELECT count(*) FROM schema_migrations"
         ).fetchone()[0]
 
-    assert migration_count == 3
+    assert migration_count == 4

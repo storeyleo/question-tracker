@@ -28,12 +28,16 @@ from PySide6.QtWidgets import (
 
 from question_tracker.application.library_service import LibraryError, LibraryService
 from question_tracker.domain.library import (
+    DocumentType,
     FileAvailability,
+    FileRole,
     LibraryModule,
     ManagedFile,
     STANDARD_CATEGORY_FOLDERS,
 )
 from question_tracker.ui.layout_spacing import CONTROL_SPACING, compact_layout
+from question_tracker.ui.file_recovery import confirm_pdf_replacement
+from question_tracker.domain.tracking import SetupState
 
 
 PDF_ERROR_MESSAGES = {
@@ -62,7 +66,7 @@ class ManagedPdfBrowser(QTreeWidget):
         self._file_items: dict[str, QTreeWidgetItem] = {}
         self._path_items: dict[tuple[str, ...], QTreeWidgetItem] = {}
         self.setColumnCount(2)
-        self.setHeaderLabels(("Managed PDFs", ""))
+        self.setHeaderLabels(("Managed PDFs", "Status / actions"))
         self.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.header().setSectionResizeMode(
             1, QHeaderView.ResizeMode.ResizeToContents
@@ -142,6 +146,14 @@ class ManagedPdfBrowser(QTreeWidget):
             if managed_file.availability is FileAvailability.MISSING:
                 label = f"{label} [Missing]"
             file_item = QTreeWidgetItem([label])
+            sets = self.library_service.question_sets_for_file(managed_file.id, FileRole.MAIN)
+            state = (
+                "Ready" if sets and sets[0].setup_state is SetupState.READY
+                else "Needs Setup" if sets
+                else "Solution / reference" if managed_file.document_type is DocumentType.SOLUTION
+                else "Unconfigured"
+            )
+            file_item.setText(1, state)
             file_item.setData(0, self.FILE_ID_ROLE, managed_file.id)
             file_item.setData(
                 0, self.FOLDER_PATH_ROLE, managed_file.relative_path.as_posix()
@@ -736,8 +748,12 @@ class PdfPane(QWidget):
             return
         file_id = self.current_file_id
         try:
+            if not confirm_pdf_replacement(self, self.library_service, file_id):
+                return
+            self._release_document()
             self.library_service.replace_file(file_id, Path(filename))
         except LibraryError as error:
+            self.open_managed_file(file_id)
             QMessageBox.warning(self, "Replace PDF", str(error))
             return
         self.refresh_browser()

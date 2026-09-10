@@ -40,6 +40,8 @@ from question_tracker.domain.library import (
 from question_tracker.domain.tracking import QuestionSet, SetupState
 from question_tracker.paths import ApplicationPaths
 from question_tracker.ui.import_dialog import ImportPdfDialog
+from question_tracker.ui.file_recovery import confirm_pdf_replacement
+from question_tracker.ui.reference_dialog import ReferenceDialog
 from question_tracker.ui.layout_spacing import (
     PAGE_MARGIN,
     SECTION_SPACING,
@@ -184,12 +186,16 @@ class HomeScreen(QWidget):
         self.quick_replace_button = QPushButton("Replace PDF...")
         self.quick_replace_button.setObjectName("homeBrowserReplaceButton")
         self.quick_replace_button.clicked.connect(self._replace_browser_file)
+        self.references_button = QPushButton("Manage References...")
+        self.references_button.setObjectName("homeManageReferencesButton")
+        self.references_button.clicked.connect(self._manage_references)
         browser_actions = QHBoxLayout()
         for button in (
             self.quick_tracker_button,
             self.quick_marking_button,
             self.quick_setup_button,
             self.quick_replace_button,
+            self.references_button,
         ):
             browser_actions.addWidget(button)
         browser_actions.addStretch()
@@ -309,7 +315,12 @@ class HomeScreen(QWidget):
 
     def refresh(self) -> None:
         selected_id = self._selected_question_set_id()
-        scan_result = self.library_service.refresh()
+        try:
+            scan_result = self.library_service.refresh()
+            folders = self.library_service.list_folders()
+        except LibraryError as error:
+            QMessageBox.warning(self, "Refresh Library", str(error))
+            return
         self.snapshot = build_home_snapshot(
             self.service, self.library_service, scan_result
         )
@@ -317,7 +328,7 @@ class HomeScreen(QWidget):
         self.library_browser.populate(
             years=self.snapshot.years,
             modules=(summary.module for summary in self.snapshot.modules),
-            folders=self.library_service.list_folders(),
+            folders=folders,
         )
         self._populate_needs_setup()
         self._populate_question_sets(selected_id)
@@ -443,6 +454,7 @@ class HomeScreen(QWidget):
             and self.open_tracker is not None
         )
         self.quick_setup_button.setEnabled(question_set is not None)
+        self.references_button.setEnabled(question_set is not None)
         self.quick_marking_button.setEnabled(
             managed_file is not None
             and (
@@ -497,6 +509,11 @@ class HomeScreen(QWidget):
         if question_set is not None:
             self._edit_question_set(question_set.id)
 
+    def _manage_references(self) -> None:
+        question_set = self._question_set_for_file(self._selected_managed_file())
+        if question_set is not None:
+            ReferenceDialog(self.library_service, question_set.id, self).exec()
+
     def _replace_browser_file(self) -> None:
         managed_file = self._selected_managed_file()
         if managed_file is None:
@@ -507,6 +524,8 @@ class HomeScreen(QWidget):
         if not filename:
             return
         try:
+            if not confirm_pdf_replacement(self, self.library_service, managed_file.id):
+                return
             self.library_service.replace_file(managed_file.id, Path(filename))
         except LibraryError as error:
             QMessageBox.warning(self, "Replace PDF", str(error))
