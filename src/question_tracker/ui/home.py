@@ -7,6 +7,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QInputDialog,
@@ -39,6 +40,11 @@ from question_tracker.domain.library import (
 from question_tracker.domain.tracking import QuestionSet, SetupState
 from question_tracker.paths import ApplicationPaths
 from question_tracker.ui.import_dialog import ImportPdfDialog
+from question_tracker.ui.layout_spacing import (
+    PAGE_MARGIN,
+    SECTION_SPACING,
+    compact_layout,
+)
 from question_tracker.ui.pdf_pane import ManagedPdfBrowser
 from question_tracker.ui.question_editor import QuestionEditorDialog
 
@@ -56,11 +62,11 @@ class ModuleCard(QPushButton):
         papers = summary.past_papers
         text = (
             f"{summary.module.module_name}\n"
-            f"{summary.module.year_name}\n\n"
+            f"{summary.module.year_name}\n"
             f"Problem Sheets: {sheets.complete} / {sheets.total} attempted"
-            f"  ({sheets.mastered} mastered)\n"
+            f"\n  {sheets.mastered} mastered\n"
             f"Past Papers: {papers.complete} / {papers.total} attempted"
-            f"  ({papers.mastered} mastered)"
+            f"\n  {papers.mastered} mastered"
         )
         if summary.needs_setup_count:
             text += f"\nNeeds setup: {summary.needs_setup_count}"
@@ -69,8 +75,9 @@ class ModuleCard(QPushButton):
         self.setObjectName("moduleCard")
         self.setProperty("yearName", summary.module.year_name)
         self.setProperty("moduleName", summary.module.module_name)
-        self.setMinimumSize(270, 135)
+        self.setMinimumWidth(270)
         self.setMaximumWidth(330)
+        self.setStyleSheet("QPushButton#moduleCard { text-align: left; padding: 8px; }")
         self.setToolTip(
             "Open this module in Question Tracker"
             if summary.first_ready_question_set_id is not None
@@ -139,6 +146,8 @@ class HomeScreen(QWidget):
 
         self.module_container = QWidget()
         self.module_card_layout = QHBoxLayout(self.module_container)
+        compact_layout(self.module_card_layout)
+        self.module_card_layout.setSpacing(SECTION_SPACING)
         self.module_card_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
         self.module_scroll = QScrollArea()
         self.module_scroll.setObjectName("moduleCardScroll")
@@ -150,7 +159,7 @@ class HomeScreen(QWidget):
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
         self.module_scroll.setWidget(self.module_container)
-        self.module_scroll.setMinimumHeight(170)
+        self.module_scroll.setFrameShape(QFrame.Shape.NoFrame)
 
         self.library_browser = ManagedPdfBrowser(self.library_service)
         self.library_browser.setObjectName("homeLibraryBrowser")
@@ -255,15 +264,17 @@ class HomeScreen(QWidget):
         self.create_module_button.setObjectName("createModuleButton")
         self.create_module_button.clicked.connect(self._create_module)
         import_actions = QHBoxLayout()
+        import_actions.addWidget(QLabel("Import PDF:"))
         for button in (
             self.add_problem_sheet_button,
             self.add_solution_button,
             self.add_past_paper_button,
-            self.create_year_button,
-            self.create_module_button,
         ):
             import_actions.addWidget(button)
         import_actions.addStretch()
+        import_actions.addWidget(QLabel("Create:"))
+        import_actions.addWidget(self.create_year_button)
+        import_actions.addWidget(self.create_module_button)
         import_group = QGroupBox("Add to managed library")
         import_layout = QVBoxLayout(import_group)
         import_layout.addLayout(import_actions)
@@ -271,10 +282,28 @@ class HomeScreen(QWidget):
         layout = QVBoxLayout(self)
         layout.addLayout(header)
         layout.addWidget(library_path)
-        layout.addWidget(QLabel("Modules"))
+        modules_heading = QLabel("Modules / progress")
+        heading_font = modules_heading.font()
+        heading_font.setBold(True)
+        modules_heading.setFont(heading_font)
+        layout.addWidget(modules_heading)
         layout.addWidget(self.module_scroll)
         layout.addWidget(content_splitter, 1)
         layout.addWidget(import_group)
+
+        for group in (browser_group, needs_group, all_sets_group, import_group):
+            group.setFlat(True)
+            compact_layout(group.layout(), margin=PAGE_MARGIN)
+        for row in (header, browser_actions, all_sets_actions, import_actions):
+            compact_layout(row)
+        compact_layout(right_layout)
+        right_layout.setSpacing(SECTION_SPACING)
+        compact_layout(layout, margin=PAGE_MARGIN)
+        layout.setSpacing(SECTION_SPACING)
+        for tree in (self.library_browser, self.needs_setup_tree):
+            tree.setAlternatingRowColors(True)
+            tree.setFrameShape(QFrame.Shape.NoFrame)
+        self.question_set_list.setFrameShape(QFrame.Shape.NoFrame)
 
         self.refresh()
 
@@ -322,7 +351,15 @@ class HomeScreen(QWidget):
             key = (summary.module.year_name, summary.module.module_name)
             self.module_cards[key] = card
             self.module_card_layout.addWidget(card)
-        self.module_container.setMinimumWidth(len(self.module_cards) * 286)
+        # Size the strip to its content, reserving space for horizontal scrolling.
+        self.module_card_layout.invalidate()
+        self.module_container.setMinimumWidth(
+            self.module_card_layout.minimumSize().width()
+        )
+        self.module_scroll.setFixedHeight(
+            self.module_card_layout.sizeHint().height()
+            + self.module_scroll.horizontalScrollBar().sizeHint().height()
+        )
 
     def _populate_needs_setup(self) -> None:
         self.needs_setup_tree.clear()

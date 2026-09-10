@@ -33,6 +33,7 @@ from question_tracker.domain.library import (
     ManagedFile,
     STANDARD_CATEGORY_FOLDERS,
 )
+from question_tracker.ui.layout_spacing import CONTROL_SPACING, compact_layout
 
 
 PDF_ERROR_MESSAGES = {
@@ -278,6 +279,8 @@ class PdfPane(QWidget):
         pane_header.addWidget(self.mode_label)
 
         self.browser = ManagedPdfBrowser(library_service)
+        self.browser.setAlternatingRowColors(True)
+        self.browser.setFrameShape(QFrame.Shape.NoFrame)
         self.browser.setObjectName(f"{pane_name}PdfBrowser")
         self.browser.file_activated.connect(self.open_managed_file)
         self.browser.currentItemChanged.connect(self._browser_selection_changed)
@@ -288,7 +291,9 @@ class PdfPane(QWidget):
         browser_page = QWidget()
         browser_layout = QVBoxLayout(browser_page)
         browser_layout.setContentsMargins(0, 0, 0, 0)
-        browser_layout.addWidget(QLabel("Double-click a managed PDF, or select one and open it."))
+        browser_hint = QLabel("Double-click a managed PDF, or select one and open it.")
+        browser_hint.setWordWrap(True)
+        browser_layout.addWidget(browser_hint)
         browser_layout.addWidget(self.browser)
         browser_layout.addWidget(self.open_button)
 
@@ -376,6 +381,8 @@ class PdfPane(QWidget):
         toolbar_layout.addLayout(file_row)
         toolbar_layout.addLayout(navigation_row)
         toolbar_layout.addLayout(search_row)
+        for row in (file_row, navigation_row, search_row, toolbar_layout):
+            compact_layout(row)
         self.toolbar_content.setSizePolicy(
             QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed
         )
@@ -428,7 +435,9 @@ class PdfPane(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
-        layout.setContentsMargins(4, 4, 4, 4)
+        compact_layout(layout, margin=CONTROL_SPACING)
+        for inner in (pane_header, browser_layout, pdf_layout):
+            compact_layout(inner)
         layout.addLayout(pane_header)
         layout.addWidget(self.mode_stack, 1)
 
@@ -467,7 +476,7 @@ class PdfPane(QWidget):
         return self._zoom_factor
 
     def set_active(self, active: bool) -> None:
-        border = "#7aa7d9" if active else "transparent"
+        border = "palette(highlight)" if active else "transparent"
         self.setStyleSheet(
             f"#{self.objectName()} {{ border: 1px solid {border}; }}"
         )

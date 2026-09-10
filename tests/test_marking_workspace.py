@@ -245,7 +245,8 @@ def test_up_down_navigate_only_the_most_recently_active_pdf_pane(
         workspace.left_pane.fit_width_button, Qt.MouseButton.LeftButton
     )
     assert workspace.active_pdf_pane is workspace.left_pane
-    assert "#7aa7d9" in workspace.left_pane.styleSheet()
+    assert "palette(highlight)" in workspace.left_pane.styleSheet()
+    assert "palette(highlight)" not in workspace.right_pane.styleSheet()
     qtbot.keyClick(workspace.compact_tracker, Qt.Key.Key_Down)
     qtbot.waitUntil(lambda: workspace.left_pane.current_page == 1)
     assert workspace.right_pane.current_page == 0
@@ -258,6 +259,8 @@ def test_up_down_navigate_only_the_most_recently_active_pdf_pane(
         workspace.right_pane.pdf_view.viewport(), Qt.MouseButton.LeftButton
     )
     assert workspace.active_pdf_pane is workspace.right_pane
+    assert "palette(highlight)" in workspace.right_pane.styleSheet()
+    assert "palette(highlight)" not in workspace.left_pane.styleSheet()
     qtbot.keyClick(workspace.compact_tracker, Qt.Key.Key_Up)
     assert workspace.right_pane.current_page == 0
     qtbot.keyClick(workspace.compact_tracker, Qt.Key.Key_Down)

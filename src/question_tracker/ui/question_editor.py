@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QSplitter,
+    QStyle,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -42,6 +43,11 @@ from question_tracker.domain.questions import (
 )
 from question_tracker.domain.tracking import NoteConflictPolicy, SetupState, Topic
 from question_tracker.ui.colours import contrasting_text_colour
+from question_tracker.ui.layout_spacing import (
+    PAGE_MARGIN,
+    SECTION_SPACING,
+    compact_layout,
+)
 from question_tracker.ui.quick_builder import QuickBuilderDialog
 
 
@@ -72,7 +78,7 @@ class QuestionEditorDialog(QDialog):
         self.display_name_edit.editingFinished.connect(self._save_display_name)
         self.general_note_edit = QPlainTextEdit(question_set.general_note)
         self.general_note_edit.setObjectName("generalNoteEdit")
-        self.general_note_edit.setMaximumHeight(90)
+        self.general_note_edit.setMaximumHeight(64)
         self.general_note_edit.textChanged.connect(self._save_general_note)
         metadata = QFormLayout()
         metadata.addRow("Display name", self.display_name_edit)
@@ -82,6 +88,7 @@ class QuestionEditorDialog(QDialog):
         self.question_tree.setObjectName("questionTree")
         self.question_tree.setColumnCount(2)
         self.question_tree.setHeaderLabels(("Question hierarchy", "Topics"))
+        self.question_tree.setAlternatingRowColors(True)
         self.question_tree.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection
         )
@@ -118,7 +125,7 @@ class QuestionEditorDialog(QDialog):
                 self.delete_button,
             )
         ):
-            question_buttons.addWidget(button, index // 2, index % 2)
+            question_buttons.addWidget(button, index // 4, index % 4)
 
         left = QWidget()
         left_layout = QVBoxLayout(left)
@@ -128,7 +135,10 @@ class QuestionEditorDialog(QDialog):
         self.quick_builder_button = self._button(
             "Quick builder…", "quickBuilderButton", self._quick_build
         )
-        left_layout.addWidget(self.quick_builder_button)
+        structure_tools = QHBoxLayout()
+        structure_tools.addWidget(self.quick_builder_button)
+        structure_tools.addStretch()
+        left_layout.addLayout(structure_tools)
         self.reset_button = QPushButton("Reset")
         self.reset_button.setObjectName("resetQuestionSetButton")
         reset_menu = QMenu(self.reset_button)
@@ -141,11 +151,16 @@ class QuestionEditorDialog(QDialog):
         reset_menu.addAction(self.reset_attempts_action)
         reset_menu.addAction(self.reset_questions_action)
         self.reset_button.setMenu(reset_menu)
-        left_layout.addWidget(self.reset_button)
+        self.reset_button.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxWarning)
+        )
+        self.reset_button.setToolTip(
+            "Reset tracking history or questions (confirmation required)"
+        )
 
         self.question_note_edit = QPlainTextEdit()
         self.question_note_edit.setObjectName("questionNoteEdit")
-        self.question_note_edit.setMaximumHeight(90)
+        self.question_note_edit.setMaximumHeight(64)
         self.question_note_edit.textChanged.connect(self._save_question_note)
         self.bookmark_check = QCheckBox("Bookmarked")
         self.bookmark_check.setObjectName("bookmarkCheck")
@@ -159,7 +174,7 @@ class QuestionEditorDialog(QDialog):
         self.topic_list = QListWidget()
         self.topic_list.setObjectName("topicList")
         self.topic_list.currentItemChanged.connect(self._topic_selection_changed)
-        topic_buttons = QHBoxLayout()
+        topic_buttons = QGridLayout()
         self.add_topic_button = self._button("Add", "addTopicButton", self._add_topic)
         self.rename_topic_button = self._button(
             "Rename", "renameTopicButton", self._rename_topic
@@ -174,15 +189,17 @@ class QuestionEditorDialog(QDialog):
         self.topic_colour_button = self._button(
             "Colour", "topicColourButton", self._change_topic_colour
         )
-        for button in (
-            self.add_topic_button,
-            self.rename_topic_button,
-            self.delete_topic_button,
-            self.topic_up_button,
-            self.topic_down_button,
-            self.topic_colour_button,
+        for index, button in enumerate(
+            (
+                self.add_topic_button,
+                self.rename_topic_button,
+                self.delete_topic_button,
+                self.topic_up_button,
+                self.topic_down_button,
+                self.topic_colour_button,
+            )
         ):
-            topic_buttons.addWidget(button)
+            topic_buttons.addWidget(button, index // 3, index % 3)
 
         self.assignment_list = QListWidget()
         self.assignment_list.setObjectName("topicAssignmentList")
@@ -192,6 +209,7 @@ class QuestionEditorDialog(QDialog):
         topics_layout.addWidget(self.topic_list)
         topics_layout.addLayout(topic_buttons)
         self.assignment_heading = QLabel("Assignments for selected leaf question(s)")
+        self.assignment_heading.setWordWrap(True)
         topics_layout.addWidget(self.assignment_heading)
         topics_layout.addWidget(self.assignment_list)
 
@@ -214,14 +232,26 @@ class QuestionEditorDialog(QDialog):
         )
         self.close_button = self._button("Close", "closeEditorButton", self.accept)
         final_buttons = QHBoxLayout()
+        final_buttons.addWidget(self.reset_button)
         final_buttons.addStretch()
         final_buttons.addWidget(self.close_button)
         final_buttons.addWidget(self.finish_setup_button)
 
         layout = QVBoxLayout(self)
         layout.addLayout(metadata)
-        layout.addWidget(splitter)
+        layout.addWidget(splitter, 1)
         layout.addLayout(final_buttons)
+
+        for group in (details, topics):
+            group.setFlat(True)
+            compact_layout(group.layout(), margin=PAGE_MARGIN)
+        for inner in (
+            metadata, question_buttons, left_layout, structure_tools,
+            topic_buttons, right_layout, final_buttons,
+        ):
+            compact_layout(inner)
+        compact_layout(layout, margin=PAGE_MARGIN)
+        layout.setSpacing(SECTION_SPACING)
 
         self._refresh_topics()
         self._refresh_questions()

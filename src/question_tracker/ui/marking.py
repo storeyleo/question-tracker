@@ -30,6 +30,12 @@ from question_tracker.application.tracking_service import TrackingService
 from question_tracker.domain.library import DocumentType, FileRole, LibraryModule
 from question_tracker.domain.tracking import AttemptStatus, SetupState
 from question_tracker.ui.colours import contrasting_text_colour
+from question_tracker.ui.layout_spacing import (
+    CONTROL_SPACING,
+    PAGE_MARGIN,
+    SECTION_SPACING,
+    compact_layout,
+)
 from question_tracker.ui.pdf_pane import PdfPane
 from question_tracker.ui.tracker import (
     ATTEMPT_STYLES,
@@ -250,13 +256,17 @@ class CompactTrackerWidget(QWidget):
 
         self.strip = CompactQuestionStrip()
         self.strip.setObjectName("compactQuestionStrip")
+        # Keep the PDFs dominant; longer topic/attempt content remains scrollable.
+        self.strip.setMaximumHeight(160)
         self.strip.question_selected.connect(self.select_question)
         self.strip.attempt_requested.connect(self._attempt_requested)
         self.strip.details_requested.connect(self._open_question_attempts)
 
         layout = QVBoxLayout(self)
         layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
-        layout.setContentsMargins(4, 4, 4, 4)
+        compact_layout(layout, margin=CONTROL_SPACING)
+        compact_layout(header)
+        compact_layout(controls)
         layout.addLayout(header)
         layout.addLayout(controls)
         layout.addWidget(self.strip)
@@ -575,6 +585,9 @@ class MarkingWorkspace(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
+        compact_layout(layout, margin=PAGE_MARGIN)
+        layout.setSpacing(SECTION_SPACING)
+        compact_layout(header)
         layout.addLayout(header)
         layout.addWidget(self.document_splitter, 1)
         layout.addWidget(self.compact_tracker)

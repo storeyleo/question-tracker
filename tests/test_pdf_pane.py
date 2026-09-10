@@ -354,3 +354,10 @@ def test_pdf_toolbar_scrolls_horizontally_without_imposing_pane_width(
     assert pane.fit_width_button.isEnabled()
     pane.fit_width_button.click()
     assert pane.pdf_view.zoomMode() == QPdfView.ZoomMode.FitToWidth
+
+    # Controls at the end of a narrow toolbar remain reachable by scrolling.
+    pane.search_edit.setText("example")
+    pane.toolbar_scroll.ensureWidgetVisible(pane.clear_search_button)
+    qtbot.mouseClick(pane.clear_search_button, Qt.MouseButton.LeftButton)
+    assert pane.search_edit.text() == ""
+    assert pane.pdf_view.zoomMode() == QPdfView.ZoomMode.FitToWidth

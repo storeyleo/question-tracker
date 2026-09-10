@@ -67,6 +67,34 @@ def test_basic_add_question_interaction(
     assert dialog.question_tree.topLevelItemCount() == 1
 
 
+def test_compact_editor_actions_remain_accessible(
+    qtbot, monkeypatch, tracking_service: TrackingService
+) -> None:
+    question_set = _new_set(tracking_service)
+    tracking_service.create_question(question_set.id, "1")
+    dialog = QuestionEditorDialog(tracking_service, question_set.id)
+    qtbot.addWidget(dialog)
+    dialog.show()
+
+    for button in (
+        dialog.add_root_button, dialog.add_sibling_button, dialog.add_child_button,
+        dialog.rename_button, dialog.move_up_button, dialog.move_down_button,
+        dialog.reparent_button, dialog.delete_button, dialog.quick_builder_button,
+        dialog.add_topic_button, dialog.rename_topic_button, dialog.delete_topic_button,
+        dialog.topic_up_button, dialog.topic_down_button, dialog.topic_colour_button,
+        dialog.reset_button, dialog.close_button, dialog.finish_setup_button,
+    ):
+        assert button.isVisibleTo(dialog)
+    assert dialog.reset_button.menu().actions() == [
+        dialog.reset_attempts_action, dialog.reset_questions_action,
+    ]
+
+    monkeypatch.setattr(QInputDialog, "getText", lambda *args, **kwargs: ("Algebra", True))
+    qtbot.mouseClick(dialog.add_topic_button, Qt.MouseButton.LeftButton)
+    assert dialog.topic_list.count() == 1
+    assert dialog.topic_list.item(0).text() == "Algebra"
+
+
 def test_invalid_fourth_level_is_reported_without_crashing(
     qtbot, monkeypatch, tracking_service: TrackingService
 ) -> None:
