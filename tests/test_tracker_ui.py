@@ -4,7 +4,7 @@ from pathlib import Path
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from PySide6.QtCore import QItemSelectionModel, QPoint, Qt
+from PySide6.QtCore import QItemSelectionModel, QPoint, QTimer, Qt
 from PySide6.QtGui import QUndoStack
 from PySide6.QtWidgets import (
     QDialog,
@@ -388,6 +388,71 @@ def test_history_deletion_refreshes_tracker_and_is_one_undo_action(
     assert not dialog.delete_button.isEnabled()
 
 
+@pytest.mark.parametrize("delete_count", [1, 2, 3])
+def test_modal_history_deletion_keeps_initiating_cell_alive_until_return(
+    qtbot, monkeypatch, tracking_service, library_service, delete_count
+):
+    question_set, questions = _ready_set(tracking_service, 1)
+    question = questions[0]
+    before = tuple(
+        tracking_service.add_attempt(question.id, status, note=f"Saved {index}")
+        for index, status in enumerate((AttemptStatus.CORRECT, AttemptStatus.PARTIAL, AttemptStatus.INCORRECT))
+    )
+    remaining = before[:-delete_count]
+    screen = _screen(qtbot, tracking_service, library_service, question_set.id)
+    initiating_cell = screen.question_cells[question.id]
+    refresh_calls = []
+    refresh = screen.refresh_current
+
+    def record_refresh(*args, **kwargs):
+        refresh_calls.append(True)
+        return refresh(*args, **kwargs)
+
+    monkeypatch.setattr(screen, "refresh_current", record_refresh)
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.StandardButton.Yes)
+    exercised = []
+
+    def delete_in_real_modal_dialog():
+        dialog = screen.findChild(QuestionAttemptsDialog)
+        try:
+            assert dialog is not None and dialog.isVisible()
+            flags = QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows
+            for row in range(delete_count):
+                dialog.attempts_table.selectionModel().select(dialog.attempts_table.model().index(row, 0), flags)
+            qtbot.mouseClick(dialog.delete_button, Qt.MouseButton.LeftButton)
+            assert tracking_service.attempts_for_question(question.id) == remaining
+            assert dialog.isVisible()
+            assert dialog.attempts_table.rowCount() == len(remaining)
+            # The original mouse event is still waiting inside dialog.exec().
+            assert refresh_calls == []
+            assert screen.question_cells[question.id] is initiating_cell
+            assert initiating_cell.objectName() == f"questionCell-{question.id}"
+            exercised.append(True)
+        finally:
+            if dialog is not None:
+                dialog.accept()
+
+    QTimer.singleShot(0, screen, delete_in_real_modal_dialog)
+    # Do not mock exec(): reproduce the actual nested modal/input-event path.
+    qtbot.mouseClick(initiating_cell, Qt.MouseButton.LeftButton, pos=QPoint(1, 1))
+    assert exercised == [True]
+    qtbot.waitUntil(lambda: len(refresh_calls) == 1)
+    assert screen.question_cells[question.id] is not initiating_cell
+    assert screen.selected_question_id == question.id
+    column = screen.question_cells[question.id].column
+    assert tuple(item.attempt for item in column.attempts) == remaining
+    assert column.is_unattempted == (not remaining)
+    assert screen.snapshot.progress.complete == bool(remaining)
+    assert screen.snapshot.progress.mastered == bool(remaining and remaining[-1].status is AttemptStatus.CORRECT)
+    if not remaining:
+        assert screen.findChild(QPushButton, f"unattemptedButton-{question.id}") is not None
+    assert screen.undo_stack.count() == 1
+    screen.undo_stack.undo()
+    assert tracking_service.attempts_for_question(question.id) == before
+    screen.undo_stack.redo()
+    assert tracking_service.attempts_for_question(question.id) == remaining
+
+
 def test_attempt_editor_changes_existing_attempt_in_place(
     qtbot,
     monkeypatch,
@@ -628,8 +693,8 @@ def test_topic_band_uses_persisted_colour_and_readable_foreground(
     band = screen.findChild(QLabel, f"topicSpan-{topic.id}-0-1")
 
     assert band is not None
-    assert "background: #112233" in band.styleSheet()
-    assert "color: #FFFFFF" in band.styleSheet()
+    assert band.topic_colour.name() == "#112233"
+    assert band.contrast_colour.name() == contrasting_text_colour("#112233").lower()
     assert contrasting_text_colour("#000000") == "#FFFFFF"
     assert contrasting_text_colour("#FFFFFF") == "#000000"
 
@@ -654,7 +719,7 @@ def test_returning_from_question_editor_refreshes_topic_band_colour(
 
     band = screen.findChild(QLabel, f"topicSpan-{topic.id}-0-0")
     assert band is not None
-    assert "background: #654321" in band.styleSheet()
+    assert band.topic_colour.name() == "#654321"
 
 
 def test_module_view_shows_all_ready_question_sets_together(

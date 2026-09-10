@@ -5,7 +5,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from PySide6.QtCore import QRect, QTimer, Qt, Signal
-from PySide6.QtGui import QAction, QColor, QDrag, QKeySequence, QPainter, QPalette, QPen, QShortcut, QUndoStack
+from PySide6.QtGui import QAction, QColor, QDrag, QKeySequence, QPainter, QPainterPath, QPalette, QPen, QShortcut, QUndoStack
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractSpinBox,
@@ -110,6 +110,8 @@ class TrackerMetrics:
     selection_outline_thickness: int = 2
     heading_row_height: int = 20
     topic_row_height: int = 20
+    topic_text_size: int = 10
+    topic_line_thickness: int = 1
     vertical_spacing: int = 2
     topic_spacing: int = 2
     section_padding: int = 10
@@ -185,6 +187,47 @@ class HierarchyHeadingLabel(QLabel):
         line_start = rect.left() + self.fontMetrics().horizontalAdvance(text) + self._label_gap
         if line_start < rect.right():
             painter.setPen(QPen(colour, self.line_thickness))
+            painter.drawLine(line_start, rect.center().y(), rect.right(), rect.center().y())
+
+
+class TopicBandLabel(QLabel):
+    """Main-tracker annotation sized by its grid span, not its title."""
+
+    def __init__(self, text: str, colour: str, scale: float) -> None:
+        super().__init__(text)
+        self.topic_colour = QColor(colour)
+        self.contrast_colour = QColor(contrasting_text_colour(colour))
+        self.line_thickness = _scaled(TRACKER_METRICS.topic_line_thickness, scale)
+        self._label_gap = _scaled(TRACKER_METRICS.cell_margin, scale)
+        font = self.font()
+        font.setPixelSize(_scaled(TRACKER_METRICS.topic_text_size, scale))
+        font.setBold(False)
+        self.setFont(font)
+        self.setToolTip(text)
+        self.setFixedHeight(_scaled(TRACKER_METRICS.topic_row_height, scale))
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = self.contentsRect().adjusted(self.line_thickness, 0, -self.line_thickness, 0)
+        metrics = self.fontMetrics()
+        text = metrics.elidedText(
+            self.text(), Qt.TextElideMode.ElideRight,
+            max(0, rect.width() - self._label_gap * 2),
+        )
+        baseline = rect.top() + (rect.height() - metrics.height()) / 2 + metrics.ascent()
+        path = QPainterPath()
+        path.addText(rect.left(), baseline, self.font(), text)
+        # Outline only the glyphs/line: keep the saved colour, without a filled card.
+        painter.setPen(QPen(self.contrast_colour, self.line_thickness))
+        painter.setBrush(self.topic_colour)
+        painter.drawPath(path)
+        line_start = rect.left() + metrics.horizontalAdvance(text) + self._label_gap
+        if line_start < rect.right():
+            painter.setPen(QPen(self.contrast_colour, self.line_thickness * 2))
+            painter.drawLine(line_start, rect.center().y(), rect.right(), rect.center().y())
+            painter.setPen(QPen(self.topic_colour, self.line_thickness))
             painter.drawLine(line_start, rect.center().y(), rect.right(), rect.center().y())
 
 
@@ -693,6 +736,8 @@ class TrackerScreen(QWidget):
         self.zoom_percent = DEFAULT_ZOOM_PERCENT
         self.appearance = load_tracker_appearance()
         self._scroll_revision = 0
+        self._attempt_history_open = False
+        self._attempt_history_refresh_pending = False
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         back_button = QPushButton("Back to Home")
@@ -1076,19 +1121,9 @@ class TrackerScreen(QWidget):
                 topic.id: row + index for index, topic in enumerate(topics)
             }
             for span in question_set_snapshot.topic_spans:
-                label = QLabel(span.topic.title)
+                label = TopicBandLabel(span.topic.title, span.topic.colour, scale)
                 label.setObjectName(
                     f"topicSpan-{span.topic.id}-{span.start_column}-{span.end_column}"
-                )
-                label.setAlignment(
-                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-                )
-                label.setFixedHeight(_scaled(metrics.topic_row_height, scale))
-                label.setStyleSheet(
-                    f"color: {contrasting_text_colour(span.topic.colour)}; "
-                    f"background: {span.topic.colour}; "
-                    f"border-bottom: {_scaled(DEFAULT_APPEARANCE.hierarchy_line_thickness, scale)}px "
-                    "solid #6f7780; font-weight: bold; padding: 0px 4px;"
                 )
                 grid.addWidget(
                     label,
@@ -1406,7 +1441,17 @@ class TrackerScreen(QWidget):
             column.visible_label,
             self,
         )
-        editor.exec()
+        self._attempt_history_open = True
+        try:
+            editor.exec()
+        finally:
+            self._attempt_history_open = False
+            editor.deleteLater()
+            if self._attempt_history_refresh_pending:
+                self._attempt_history_refresh_pending = False
+                # Return through the initiating cell's input event before
+                # replacing the scroll content and destroying that cell.
+                QTimer.singleShot(0, self, self.refresh_current)
 
     def _toggle_bookmark(self, question_id: str) -> None:
         self.select_question(question_id)
@@ -1468,6 +1513,9 @@ class TrackerScreen(QWidget):
 
     def _undo_stack_changed(self, index: int) -> None:
         del index
+        if self._attempt_history_open:
+            self._attempt_history_refresh_pending = True
+            return
         self.refresh_current()
 
 
