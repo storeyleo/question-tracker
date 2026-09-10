@@ -31,6 +31,11 @@ _BOUNDS = {
 _PREFIX = "trackerAppearance/"
 
 
+def tracker_appearance_bounds(name: str) -> tuple[int, int]:
+    """Numeric control limits shared with persisted-value validation."""
+    return _BOUNDS[name]
+
+
 def _validated(name: str, value: object) -> int:
     default = getattr(DEFAULT_APPEARANCE, name)
     # QSettings may return either integer values or strings from an INI file.

@@ -63,6 +63,7 @@ from question_tracker.domain.tracking import (
     latest_attempt,
 )
 from question_tracker.ui.colours import contrasting_text_colour
+from question_tracker.ui.tracker_appearance_dialog import TrackerAppearanceDialog
 from question_tracker.ui.question_editor import QuestionEditorDialog
 from question_tracker.ui.tracker_commands import (
     AddAttemptCommand,
@@ -764,16 +765,19 @@ class TrackerScreen(QWidget):
         header.addWidget(back_button)
         header.addWidget(heading)
         header.addStretch()
-        header.addWidget(self.undo_button)
-        header.addWidget(self.redo_button)
+        self.appearance_button = QPushButton("Appearance…")
+        self.appearance_button.setObjectName("trackerAppearanceButton")
+        self.appearance_button.clicked.connect(self._open_appearance)
+        header.addWidget(self.appearance_button)
 
+        selected_controls = QHBoxLayout()
         for shortcut, status in STATUS_SHORTCUTS.items():
             style = ATTEMPT_STYLES[status]
             button = QPushButton(f"{shortcut}  {style.label}")
             button.setObjectName(f"mark{status.value.title().replace('_', '')}Button")
             button.setStyleSheet(
                 f"background: {style.colour}; color: {style.text_colour}; "
-                "font-weight: bold; padding: 6px;"
+                f"font-weight: bold; padding: {TRACKER_METRICS.cell_margin}px;"
             )
             button.clicked.connect(
                 lambda checked=False, selected_status=status: self.mark_selected(
@@ -781,9 +785,8 @@ class TrackerScreen(QWidget):
                 )
             )
             self.status_buttons[status] = button
-            header.addWidget(button)
+            selected_controls.addWidget(button)
 
-        selected_controls = QHBoxLayout()
         self.bookmark_button = QPushButton("☆ Bookmark")
         self.bookmark_button.setObjectName("selectedBookmarkButton")
         self.bookmark_button.clicked.connect(
@@ -796,9 +799,12 @@ class TrackerScreen(QWidget):
             lambda: self._edit_question_note(self.selected_question_id)
             if self.selected_question_id is not None else None
         )
-        selected_controls.addStretch()
+        selected_controls.addWidget(QLabel("Selected question:"))
         selected_controls.addWidget(self.bookmark_button)
         selected_controls.addWidget(self.note_button)
+        selected_controls.addStretch()
+        selected_controls.addWidget(self.undo_button)
+        selected_controls.addWidget(self.redo_button)
         self.navigation_tree = ManagedLibraryTree()
         self.navigation_tree.reorder_requested.connect(self._reorder_sheet)
         self.navigation_tree.setObjectName("trackerNavigationTree")
@@ -1080,7 +1086,7 @@ class TrackerScreen(QWidget):
         content = QWidget()
         content.setObjectName("trackerColumnsWidget")
         grid = QGridLayout(content)
-        grid.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        grid.setAlignment(Qt.AlignmentFlag.AlignTop)
         scale = self.zoom_percent / 100
         metrics = TrackerMetrics(self.appearance)
         grid.setHorizontalSpacing(max(0, round(metrics.horizontal_spacing * scale)))
@@ -1088,28 +1094,19 @@ class TrackerScreen(QWidget):
         widest_set = max(
             (len(item.columns) for item in snapshot.question_sets), default=1
         )
+        # Let section headers use the available width without stretching leaf columns.
+        grid.setColumnStretch(widest_set, 1)
         row = 0
         self.question_cells = {}
         self.hierarchy_headings = {}
         self.question_set_by_question = {}
         for question_set_snapshot in snapshot.question_sets:
-            section_title = QLabel(question_set_snapshot.question_set.display_name)
-            section_title.setObjectName(
-                f"questionSetHeading-{question_set_snapshot.question_set.id}"
-            )
-            section_title.setStyleSheet(
-                "color: #202124; background: #d8e7f7; border: 1px solid #8aa9c7; "
-                "font-size: 15px; font-weight: bold; padding: 5px;"
-            )
-            section_title.setToolTip(
-                question_set_snapshot.question_set.general_note
-            )
             grid.addWidget(
-                section_title,
+                self._section_header(question_set_snapshot),
                 row,
                 0,
                 1,
-                max(1, len(question_set_snapshot.columns)),
+                widest_set + 1,
             )
             row += 1
 
@@ -1206,6 +1203,72 @@ class TrackerScreen(QWidget):
         self._restore_scroll_position(
             horizontal_position, vertical_position
         )
+
+    def _open_appearance(self) -> None:
+        dialog = TrackerAppearanceDialog(self)
+        dialog.appearance_applied.connect(self._apply_appearance)
+        try:
+            dialog.exec()
+        finally:
+            dialog.deleteLater()
+
+    def _apply_appearance(self, appearance: TrackerAppearance) -> None:
+        self.appearance = appearance
+        if self.module_snapshot is not None:
+            self._render_snapshot(self.module_snapshot)
+
+    def _section_header(self, snapshot: TrackerSnapshot) -> QWidget:
+        question_set = snapshot.question_set
+        header = QWidget()
+        header.setObjectName(f"questionSetSection-{question_set.id}")
+        layout = QVBoxLayout(header)
+        layout.setContentsMargins(0, TRACKER_METRICS.cell_margin, 0, TRACKER_METRICS.cell_margin)
+        layout.setSpacing(TRACKER_METRICS.vertical_spacing)
+        title = QLabel(question_set.display_name)
+        title.setObjectName(f"questionSetHeading-{question_set.id}")
+        title.setToolTip(question_set.display_name + "\n" + question_set.general_note)
+        title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        font = title.font()
+        font.setBold(True)
+        title.setFont(font)
+        progress = QLabel(
+            f"Attempted {snapshot.attempted_count}/{len(snapshot.columns)}   "
+            f"{'Complete' if snapshot.progress.complete else 'Incomplete'}   "
+            f"{'Mastered' if snapshot.progress.mastered else 'Not Mastered'}"
+        )
+        progress.setObjectName(f"questionSetProgress-{question_set.id}")
+        title_row = QHBoxLayout()
+        title_row.addWidget(title, 1)
+        title_row.addWidget(progress)
+        layout.addLayout(title_row)
+        actions = QHBoxLayout()
+        edit = QPushButton("Edit Questions")
+        edit.setObjectName(f"sectionEditQuestions-{question_set.id}")
+        edit.clicked.connect(
+            lambda: QTimer.singleShot(0, self, lambda: self._edit_question_set(question_set.id))
+        )
+        marking = QPushButton("Open Marking")
+        marking.setObjectName(f"sectionOpenMarking-{question_set.id}")
+        marking.setEnabled(self.on_open_marking is not None and bool(snapshot.columns))
+        marking.clicked.connect(
+            lambda: QTimer.singleShot(0, self, lambda: self._open_section_marking(question_set.id))
+        )
+        actions.addWidget(edit)
+        actions.addWidget(marking)
+        actions.addStretch()
+        layout.addLayout(actions)
+        return header
+
+    def _open_section_marking(self, question_set_id: str) -> None:
+        if self.on_open_marking is None or self.module_snapshot is None:
+            return
+        snapshot = next((item for item in self.module_snapshot.question_sets
+                         if item.question_set.id == question_set_id), None)
+        if snapshot is None or not snapshot.columns:
+            return
+        ids = {column.question.id for column in snapshot.columns}
+        selected = self.selected_question_id if self.selected_question_id in ids else snapshot.columns[0].question.id
+        self.on_open_marking(question_set_id, selected)
 
     def _restore_scroll_position(
         self, horizontal_position: int, vertical_position: int
@@ -1393,8 +1456,11 @@ class TrackerScreen(QWidget):
     def _edit_questions(self) -> None:
         if self.current_question_set_id is None:
             return
+        self._edit_question_set(self.current_question_set_id)
+
+    def _edit_question_set(self, question_set_id: str) -> None:
         editor = QuestionEditorDialog(
-            self.service, self.current_question_set_id, self
+            self.service, question_set_id, self
         )
         editor.exec()
         self.undo_stack.clear()
