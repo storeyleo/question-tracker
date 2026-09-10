@@ -73,6 +73,38 @@ class TrackingRepository:
             (name, now, question_set_id),
         )
 
+    def review_set_paths(self) -> tuple[tuple[QuestionSet, str | None], ...]:
+        rows = self.connection.execute(
+            "SELECT qs.*, mf.relative_path FROM question_sets qs "
+            "LEFT JOIN question_set_files links ON links.question_set_id = qs.id AND links.role = 'main' "
+            "LEFT JOIN managed_files mf ON mf.id = links.file_id"
+        )
+        return tuple((_question_set_from_row(row), row["relative_path"]) for row in rows)
+
+    def review_questions_and_latest(
+        self, set_ids: tuple[str, ...],
+    ) -> tuple[tuple[Question, ...], tuple[Attempt, ...]]:
+        questions: list[Question] = []
+        attempts: list[Attempt] = []
+        # Bound SQLite parameters; queries scale with batches, never with leaves.
+        for start in range(0, len(set_ids), 500):
+            batch = set_ids[start:start + 500]
+            parameters = ",".join("?" for _ in batch)
+            questions.extend(_question_from_row(row) for row in self.connection.execute(
+                f"SELECT * FROM questions WHERE question_set_id IN ({parameters})", batch,
+            ))
+            attempts.extend(_attempt_from_row(row) for row in self.connection.execute(
+                f"""SELECT * FROM (
+                    SELECT a.*, ROW_NUMBER() OVER (
+                        PARTITION BY a.question_id
+                        ORDER BY a.occurred_at_utc DESC, a.created_at_utc DESC, a.id DESC
+                    ) AS position
+                    FROM attempts a JOIN questions q ON q.id = a.question_id
+                    WHERE q.question_set_id IN ({parameters})
+                ) WHERE position = 1""", batch,
+            ))
+        return tuple(questions), tuple(attempts)
+
     def update_question_set_order(self, question_set_id: str, position: int) -> None:
         self.connection.execute(
             "UPDATE question_sets SET display_order = ? WHERE id = ?",

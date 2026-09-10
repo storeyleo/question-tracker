@@ -108,6 +108,7 @@ class HomeScreen(QWidget):
         parent: QWidget | None = None,
         *,
         open_tracker: Callable[[str], None] | None = None,
+        open_review: Callable[[], None] | None = None,
         open_marking: Callable[[str | None], None] | None = None,
         open_file_marking: Callable[[str], None] | None = None,
         library_service: LibraryService | None = None,
@@ -140,6 +141,12 @@ class HomeScreen(QWidget):
         header = QHBoxLayout()
         header.addWidget(heading)
         header.addStretch()
+        self.review_button = QPushButton("Statistics / Review")
+        self.review_button.setObjectName("openStatisticsReviewButton")
+        self.review_button.setEnabled(open_review is not None)
+        if open_review is not None:
+            self.review_button.clicked.connect(lambda checked=False: open_review())
+        header.addWidget(self.review_button)
         header.addWidget(self.generic_marking_button)
         header.addWidget(self.refresh_button)
 

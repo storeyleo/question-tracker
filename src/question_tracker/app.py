@@ -7,14 +7,16 @@ from pathlib import Path
 
 from PySide6.QtCore import QCoreApplication, QEvent
 from PySide6.QtGui import QUndoStack
-from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBox
+from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBox, QPushButton
 
 from question_tracker.application.library_service import LibraryService
 from question_tracker.application.backup_service import BackupError, BackupService, RecoveryError
 from question_tracker.application.tracking_service import TrackingService
+from question_tracker.application.review_service import ReviewFilter, ReviewService
 from question_tracker.paths import ApplicationPaths
 from question_tracker.persistence.database import Database
 from question_tracker.ui.home import HomeScreen
+from question_tracker.ui.review import ReviewScreen
 from question_tracker.ui.marking import MarkingWorkspace
 from question_tracker.ui.tracker import TrackerScreen
 
@@ -109,24 +111,43 @@ class MainWindow(QMainWindow):
                 self.paths,
                 self,
                 open_tracker=self.show_tracker,
+                open_review=self.show_review,
                 open_marking=self.show_marking,
                 open_file_marking=self.show_file_in_marking,
                 library_service=self.library_service,
             )
         )
 
-    def show_tracker(self, question_set_id: str) -> None:
+    def show_review(self, module=None, filter=ReviewFilter.REATTEMPT) -> None:
+        self.setCentralWidget(ReviewScreen(
+            ReviewService(self.tracking_service.database), on_back=self.show_home,
+            initial_module=module, initial_filter=filter, parent=self,
+            open_tracker=lambda item, selected_filter: self.show_tracker(
+                item.question_set.id, item.question.id,
+                on_back=lambda: self.show_review(item.module, selected_filter),
+            ),
+            open_marking=lambda item, selected_filter: self.show_marking(
+                item.question_set.id, item.question.id,
+                on_back=lambda: self.show_review(item.module, selected_filter),
+            ),
+        ))
+
+    def show_tracker(self, question_set_id: str, selected_question_id: str | None = None, *, on_back=None) -> None:
         self.setCentralWidget(
             TrackerScreen(
                 self.tracking_service,
                 self.library_service,
                 self.undo_stack,
-                on_back=self.show_home,
+                on_back=on_back or self.show_home,
                 on_open_marking=self.show_marking,
                 initial_question_set_id=question_set_id,
                 parent=self,
             )
         )
+        if selected_question_id is not None:
+            self.centralWidget().select_question(selected_question_id, reveal=True)
+        if on_back is not None:
+            self.centralWidget().findChild(QPushButton, "backToHomeButton").setText("Back to Review")
 
     def show_file_in_marking(self, file_id: str) -> None:
         self.setCentralWidget(
@@ -144,18 +165,21 @@ class MainWindow(QMainWindow):
         self,
         question_set_id: str | None = None,
         selected_question_id: str | None = None,
+        *, on_back=None,
     ) -> None:
         self.setCentralWidget(
             MarkingWorkspace(
                 self.tracking_service,
                 self.library_service,
                 self.undo_stack,
-                on_back=self.show_home,
+                on_back=on_back or self.show_home,
                 initial_question_set_id=question_set_id,
                 initial_question_id=selected_question_id,
                 parent=self,
             )
         )
+        if on_back is not None:
+            self.centralWidget().findChild(QPushButton, "markingBackButton").setText("Back to Review")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
