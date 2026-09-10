@@ -5,7 +5,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from PySide6.QtCore import QRect, QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QDrag, QKeySequence, QPainter, QPen, QShortcut, QUndoStack
+from PySide6.QtGui import QAction, QColor, QDrag, QKeySequence, QPainter, QPalette, QPen, QShortcut, QUndoStack
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractSpinBox,
@@ -107,6 +107,7 @@ class TrackerMetrics:
     cell_margin: int = 3
     stack_margin: int = 4
     attempt_max_x_steps: int = 4
+    selection_outline_thickness: int = 2
     heading_row_height: int = 20
     topic_row_height: int = 20
     vertical_spacing: int = 2
@@ -133,7 +134,7 @@ class TrackerMetrics:
 TRACKER_METRICS = TrackerMetrics()
 
 
-def _scaled(value: int, scale: float) -> int:
+def _scaled(value: float, scale: float) -> int:
     return max(1, round(value * scale))
 
 
@@ -205,13 +206,16 @@ class AttemptStackWidget(QWidget):
         parent: QWidget | None = None,
         *,
         appearance: TrackerAppearance = DEFAULT_APPEARANCE,
+        refined: bool = False,
     ) -> None:
         super().__init__(parent)
         self.setObjectName(f"attemptStack-{column.question.id}")
         metrics = TrackerMetrics(appearance)
+        history_steps = max(0, len(column.attempts) - 1)
+        visible_steps = min(history_steps, metrics.attempt_max_x_steps) if refined else history_steps
         stack_height = (
             appearance.question_box_size + metrics.stack_margin * 2
-            + max(0, len(column.attempts) - 1) * appearance.attempt_stack_offset
+            + visible_steps * appearance.attempt_stack_offset
         )
         self.setFixedSize(_scaled(metrics.stack_width, scale), _scaled(stack_height, scale))
         if not column.attempts:
@@ -225,7 +229,8 @@ class AttemptStackWidget(QWidget):
                 _scaled(appearance.question_box_size, scale),
             )
             empty.setStyleSheet(
-                "background: white; border: 1px solid #999; color: #555;"
+                "background: palette(base); border: 1px solid palette(text);"
+                if refined else "background: white; border: 1px solid #999; color: #555;"
             )
             empty.clicked.connect(self.details_requested)
             return
@@ -235,6 +240,12 @@ class AttemptStackWidget(QWidget):
             style = ATTEMPT_STYLES[attempt.status]
             horizontal_offset = min(index, metrics.attempt_max_x_steps) * appearance.attempt_stack_offset
             vertical_offset = index * appearance.attempt_stack_offset
+            if refined:
+                # Keep all attempt widgets/history; compress long stacks into
+                # the existing horizontal offset budget on both axes.
+                horizontal_offset = vertical_offset = (
+                    index * visible_steps * appearance.attempt_stack_offset / max(1, history_steps)
+                )
             button = QPushButton("", self)
             button.setAccessibleName(style.label)
             button.setObjectName(f"attemptButton-{attempt.id}")
@@ -271,11 +282,23 @@ class QuestionCell(QFrame):
         parent: QWidget | None = None,
         *,
         appearance: TrackerAppearance = DEFAULT_APPEARANCE,
+        refined: bool = False,
     ) -> None:
         super().__init__(parent)
         self.column = column
+        self._refined = refined
+        self._selection_width = _scaled(TRACKER_METRICS.selection_outline_thickness, scale)
         self.setObjectName(f"questionCell-{column.question.id}")
         self.setFixedWidth(_scaled(TrackerMetrics(appearance).cell_width, scale))
+        if refined:
+            self.setToolTip("Click around the attempt boxes to view all attempts.")
+            self.setContextMenuPolicy(Qt.ContextMenuPolicy.ActionsContextMenu)
+            view_attempts = QAction("View Attempts…", self)
+            view_attempts.setObjectName("viewQuestionAttemptsAction")
+            view_attempts.triggered.connect(
+                lambda: self.details_requested.emit(column.question.id)
+            )
+            self.addAction(view_attempts)
 
         # Retain the programmatic history action without rendering a leaf label;
         # visible labels live exclusively in the two hierarchy heading rows.
@@ -294,7 +317,7 @@ class QuestionCell(QFrame):
         )
         self.label_button.hide()
 
-        self.attempt_stack = AttemptStackWidget(column, scale, appearance=appearance)
+        self.attempt_stack = AttemptStackWidget(column, scale, appearance=appearance, refined=refined)
         self.attempt_stack.attempt_clicked.connect(
             lambda attempt_id: self.attempt_requested.emit(
                 column.question.id, attempt_id
@@ -314,15 +337,40 @@ class QuestionCell(QFrame):
         self.set_selected(False)
 
     def set_selected(self, selected: bool) -> None:
-        border = "2px solid #1267c4" if selected else "2px solid transparent"
+        self.is_selected = selected
+        border = "2px solid #1267c4" if selected and not self._refined else "2px solid transparent"
         self.setStyleSheet(
             f"QuestionCell {{ border: {border}; background: transparent; "
             "border-radius: 4px; }"
         )
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        if not self._refined or not self.is_selected:
+            return
+        bounds = QRect()
+        for button in self.attempt_stack.findChildren(QPushButton):
+            bounds = bounds.united(button.geometry())
+        bounds.translate(self.attempt_stack.pos())
+        padding = self._selection_width
+        inset = (self._selection_width + 1) // 2
+        bounds = bounds.adjusted(-padding, -padding, padding, padding).intersected(
+            self.rect().adjusted(inset, inset, -inset, -inset)
+        )
+        painter = QPainter(self)
+        pen = QPen(self.palette().color(QPalette.ColorRole.Highlight))
+        pen.setWidth(self._selection_width)
+        painter.setPen(pen)
+        painter.drawRect(bounds)
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
             self.selected.emit(self.column.question.id)
+            if self._refined:
+                event.accept()
+                self.details_requested.emit(self.column.question.id)
+                return
         super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:
@@ -442,11 +490,15 @@ class QuestionAttemptsDialog(QDialog):
         self.delete_button = QPushButton("Delete selected")
         self.delete_button.setObjectName("deleteSelectedAttemptsButton")
         self.delete_button.clicked.connect(self._delete_selected)
+        self.select_all_button = QPushButton("Select All")
+        self.select_all_button.setObjectName("selectAllAttemptsButton")
+        self.select_all_button.clicked.connect(self.attempts_table.selectAll)
         close_button = QPushButton("Close")
         close_button.setObjectName("closeAttemptsButton")
         close_button.clicked.connect(self.accept)
 
         actions = QHBoxLayout()
+        actions.addWidget(self.select_all_button)
         actions.addWidget(self.edit_button)
         actions.addWidget(self.delete_button)
         actions.addStretch()
@@ -467,7 +519,7 @@ class QuestionAttemptsDialog(QDialog):
         attempts = self.service.attempts_for_question(self.question_id)
         newest = latest_attempt(attempts)
         self.attempts_table.setRowCount(len(attempts))
-        for row, attempt in enumerate(attempts):
+        for row, attempt in enumerate(reversed(attempts)):
             style = ATTEMPT_STYLES[attempt.status]
             status_item = QTableWidgetItem(style.label)
             status_item.setData(self.ATTEMPT_ID_ROLE, attempt.id)
@@ -481,7 +533,7 @@ class QuestionAttemptsDialog(QDialog):
                     attempt.timestamp.astimezone().strftime("%d %b %Y, %H:%M")
                 ),
             )
-            self.attempts_table.setItem(row, 2, QTableWidgetItem(attempt.note))
+            self.attempts_table.setItem(row, 2, QTableWidgetItem(attempt.note if attempt.note.strip() else "No note"))
             self.attempts_table.setItem(
                 row,
                 3,
@@ -511,6 +563,7 @@ class QuestionAttemptsDialog(QDialog):
         )
         self.edit_button.setEnabled(selection_count == 1)
         self.delete_button.setEnabled(selection_count > 0)
+        self.select_all_button.setEnabled(self.attempts_table.rowCount() > 0)
 
     def _edit_selected(self) -> None:
         attempts = self._selected_attempts()
@@ -1076,7 +1129,7 @@ class TrackerScreen(QWidget):
 
             attempt_row = heading_start_row + question_set_snapshot.heading_row_count
             for index, column in enumerate(question_set_snapshot.columns):
-                cell = QuestionCell(column, scale, appearance=self.appearance)
+                cell = QuestionCell(column, scale, appearance=self.appearance, refined=True)
                 cell.selected.connect(self.select_question)
                 cell.attempt_requested.connect(self._attempt_requested)
                 cell.details_requested.connect(self._open_question_attempts)
@@ -1354,7 +1407,6 @@ class TrackerScreen(QWidget):
             self,
         )
         editor.exec()
-        self.refresh_current()
 
     def _toggle_bookmark(self, question_id: str) -> None:
         self.select_question(question_id)

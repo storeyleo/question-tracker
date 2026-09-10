@@ -14,11 +14,13 @@ from question_tracker.application.tracker_appearance import (
     save_tracker_appearance,
 )
 from question_tracker.domain.tracking import AttemptStatus, QuestionSetKind, SetupState
+from question_tracker.application.tracker_view import build_tracker_snapshot
 from question_tracker.ui.tracker import (
     DEFAULT_ZOOM_PERCENT,
     TRACKER_METRICS,
     QuestionCell,
     TrackerScreen,
+    ATTEMPT_STYLES,
 )
 
 
@@ -130,3 +132,75 @@ def test_tracker_consumes_settings_and_shared_cells_keep_defaults(
     assert compact_cell.width() == round(78 * 0.65)
     assert compact_button.width() == round(50 * 0.65)
     assert compact_button.x() == compact_button.y() == round(8 * 0.65)
+
+
+@pytest.mark.parametrize("status", [None, *AttemptStatus])
+def test_main_selection_is_independent_of_status(qtbot, tracking_service, status):
+    question_set = tracking_service.create_question_set(QuestionSetKind.PROBLEM_SHEET, "Selection")
+    question = tracking_service.create_question(question_set.id, "1")
+    if status is not None:
+        tracking_service.add_attempt(question.id, status)
+    column = build_tracker_snapshot(tracking_service, question_set.id).columns[0]
+    cell = QuestionCell(column, refined=True)
+    qtbot.addWidget(cell)
+    buttons = cell.attempt_stack.findChildren(QPushButton)
+    assert len(buttons) == 1
+    button = buttons[0]
+    assert button.text() == ""
+    assert button.width() == button.height()
+    if status is None:
+        assert button.objectName() == f"unattemptedButton-{question.id}"
+        assert "palette(base)" in button.styleSheet()
+        assert "palette(text)" in button.styleSheet()
+        assert button.toolTip() == "Unattempted"
+    else:
+        assert ATTEMPT_STYLES[status].colour in button.styleSheet()
+    original_style = button.styleSheet()
+    original_geometry = button.geometry()
+    original_size = cell.size()
+    for selected in (True, False, True):
+        cell.set_selected(selected)
+        assert cell.is_selected is selected
+        assert "border: 2px solid transparent" in cell.styleSheet()
+        assert "background: transparent" in cell.styleSheet()
+        assert button.styleSheet() == original_style
+        assert button.geometry() == original_geometry
+        assert cell.size() == original_size
+
+
+@pytest.mark.parametrize("scale", [0.5, 1.0, 1.6])
+def test_main_history_is_bounded_scaled_and_preserved(qtbot, qapp, tracking_service, scale):
+    question_set = tracking_service.create_question_set(QuestionSetKind.PROBLEM_SHEET, "History")
+    question = tracking_service.create_question(question_set.id, "1")
+    for index in range(12):
+        tracking_service.add_attempt(question.id, AttemptStatus.CORRECT, note=f"Attempt {index}")
+    before = tracking_service.attempts_for_question(question.id)
+    column = build_tracker_snapshot(tracking_service, question_set.id).columns[0]
+    appearance = TrackerAppearance(attempt_stack_offset=6)
+    main = QuestionCell(column, scale, appearance=appearance, refined=True)
+    compact = QuestionCell(column, scale, appearance=appearance)
+    for cell in (main, compact):
+        qtbot.addWidget(cell)
+        cell.show()
+    qapp.processEvents()
+    buttons = [
+        main.attempt_stack.findChild(QPushButton, f"attemptButton-{item.attempt.id}")
+        for item in column.attempts
+    ]
+    assert len(main.attempt_stack.findChildren(QPushButton)) == len(before)
+    assert all(button is not None for button in buttons)
+    assert main.attempt_stack.height() == round((50 + 8 + 4 * 6) * scale)
+    assert compact.attempt_stack.height() == round((50 + 8 + 11 * 6) * scale)
+    assert all(button.width() == button.height() == round(50 * scale) for button in buttons)
+    assert buttons[0].x() == buttons[0].y() == round(4 * scale)
+    assert buttons[-1].x() == buttons[-1].y() == round((4 + 4 * 6) * scale)
+    assert all(first.x() <= second.x() for first, second in zip(buttons, buttons[1:]))
+    overlap = buttons[0].geometry().intersected(buttons[-1].geometry())
+    assert not overlap.isEmpty()
+    assert main.attempt_stack.childAt(overlap.center()) is buttons[-1]
+    assert all("Attempt" in button.toolTip() for button in buttons)
+    main.set_selected(True)
+    compact.set_selected(True)
+    assert main.is_selected and compact.is_selected
+    assert "#1267c4" in compact.styleSheet()  # Existing compact selection stays intact.
+    assert tracking_service.attempts_for_question(question.id) == before

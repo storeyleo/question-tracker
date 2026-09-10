@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import UTC, datetime, timedelta
 
-from PySide6.QtCore import QItemSelectionModel, Qt
+import pytest
+from PySide6.QtCore import QItemSelectionModel, QPoint, Qt
 from PySide6.QtGui import QUndoStack
 from PySide6.QtWidgets import (
     QDialog,
@@ -76,12 +78,13 @@ def test_ready_tracker_loads_and_selects_first_leaf(
     assert screen.current_question_set_id == question_set.id
     assert screen.selected_question_id == questions[0].id
     assert list(screen.question_cells) == [question.id for question in questions]
-    assert screen.question_cells[questions[0].id].styleSheet().find("#1267c4") >= 0
+    assert screen.question_cells[questions[0].id].is_selected
 
 
 def test_keyboard_and_click_navigation_stays_within_leaf_boundaries(
-    qtbot, tracking_service: TrackingService, library_service: LibraryService
+    qtbot, monkeypatch, tracking_service: TrackingService, library_service: LibraryService
 ) -> None:
+    monkeypatch.setattr(QuestionAttemptsDialog, "exec", lambda dialog: QDialog.DialogCode.Rejected)
     question_set, questions = _ready_set(tracking_service)
     screen = _screen(qtbot, tracking_service, library_service, question_set.id)
 
@@ -270,13 +273,119 @@ def test_attempt_history_can_bulk_delete_and_undo(
     qtbot.mouseClick(dialog.delete_button, Qt.MouseButton.LeftButton)
 
     assert tracking_service.attempts_for_question(questions[0].id) == (
-        attempts[2],
+        attempts[0],
     )
     undo_stack.undo()
     assert {
         item.id
         for item in tracking_service.attempts_for_question(questions[0].id)
     } == {item.id for item in attempts}
+
+
+@pytest.mark.parametrize("access", ["question", "stack_margin", "context_action"])
+def test_attempted_question_opens_complete_history(
+    qtbot, monkeypatch, tracking_service, library_service, access
+):
+    question_set, questions = _ready_set(tracking_service, 2)
+    question = questions[1]
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    for index in range(8):
+        tracking_service.add_attempt(
+            question.id, AttemptStatus.PARTIAL,
+            timestamp=timestamp + timedelta(days=index // 2), note=f"Note {index}",
+        )
+    expected = tuple(reversed(tracking_service.attempts_for_question(question.id)))
+    opened = []
+
+    def inspect(dialog):
+        opened.append(dialog.question_id)
+        assert question.local_label in dialog.windowTitle()
+        assert dialog.attempts_table.rowCount() == len(expected)
+        assert [
+            dialog.attempts_table.item(row, 0).data(dialog.ATTEMPT_ID_ROLE)
+            for row in range(len(expected))
+        ] == [attempt.id for attempt in expected]
+        assert [dialog.attempts_table.item(row, 2).text() for row in range(len(expected))] == [
+            attempt.note for attempt in expected
+        ]
+        assert not dialog.delete_button.isEnabled()
+        return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(QuestionAttemptsDialog, "exec", inspect)
+    screen = _screen(qtbot, tracking_service, library_service, question_set.id)
+    cell = screen.question_cells[question.id]
+    if access == "context_action":
+        next(action for action in cell.actions() if action.objectName() == "viewQuestionAttemptsAction").trigger()
+    else:
+        target = cell if access == "question" else cell.attempt_stack
+        qtbot.mouseClick(target, Qt.MouseButton.LeftButton, pos=QPoint(1, 1))
+    assert opened == [question.id]
+    assert screen.selected_question_id == question.id
+
+
+def test_history_deletion_refreshes_tracker_and_is_one_undo_action(
+    qtbot, qapp, monkeypatch, tracking_service, library_service
+):
+    question_set, questions = _ready_set(tracking_service, 25)
+    question = questions[20]
+    for other in questions:
+        if other.id != question.id:
+            tracking_service.add_attempt(other.id, AttemptStatus.CORRECT)
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    before = tuple(
+        tracking_service.add_attempt(
+            question.id, status, timestamp=timestamp + timedelta(days=index), note=f"Saved {index}"
+        )
+        for index, status in enumerate((AttemptStatus.INCORRECT, AttemptStatus.PARTIAL, AttemptStatus.CORRECT))
+    )
+    screen = _screen(qtbot, tracking_service, library_service, question_set.id)
+    screen.select_question(question.id)
+    qapp.processEvents()
+    horizontal = screen.tracker_scroll.horizontalScrollBar()
+    vertical = screen.tracker_scroll.verticalScrollBar()
+    assert horizontal.maximum() > 0
+    horizontal.setValue(horizontal.maximum() // 2)
+    scroll_position = (horizontal.value(), vertical.value())
+    dialog = QuestionAttemptsDialog(tracking_service, screen.undo_stack, question.id, "21", screen)
+    qtbot.addWidget(dialog)
+    flags = QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows
+    for row in (0, 1):
+        dialog.attempts_table.selectionModel().select(dialog.attempts_table.model().index(row, 0), flags)
+    prompts = []
+
+    def cancel(parent, title, message):
+        prompts.append(message)
+        return QMessageBox.StandardButton.No
+
+    monkeypatch.setattr(QMessageBox, "question", cancel)
+    qtbot.mouseClick(dialog.delete_button, Qt.MouseButton.LeftButton)
+    assert "2 selected attempts" in prompts[0]
+    assert tracking_service.attempts_for_question(question.id) == before
+    assert screen.undo_stack.count() == 0
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.StandardButton.Yes)
+    qtbot.mouseClick(dialog.delete_button, Qt.MouseButton.LeftButton)
+    qapp.processEvents()
+    assert tracking_service.attempts_for_question(question.id) == (before[0],)
+    assert screen.undo_stack.count() == screen.undo_stack.index() == 1
+    assert screen.snapshot.progress.complete and not screen.snapshot.progress.mastered
+    assert screen.question_cells[question.id].column.attempts[-1].attempt == before[0]
+    assert screen.selected_question_id == question.id
+    assert (horizontal.value(), vertical.value()) == scroll_position
+    screen.undo_stack.undo()
+    assert tracking_service.attempts_for_question(question.id) == before
+    assert screen.snapshot.progress.mastered
+    screen.undo_stack.redo()
+    assert tracking_service.attempts_for_question(question.id) == (before[0],)
+    qtbot.mouseClick(dialog.select_all_button, Qt.MouseButton.LeftButton)
+    qtbot.mouseClick(dialog.delete_button, Qt.MouseButton.LeftButton)
+    qapp.processEvents()
+    assert tracking_service.attempts_for_question(question.id) == ()
+    assert not screen.snapshot.progress.complete and not screen.snapshot.progress.mastered
+    assert screen.question_cells[question.id].column.is_unattempted
+    assert screen.findChild(QPushButton, f"unattemptedButton-{question.id}") is not None
+    assert screen.selected_question_id == question.id
+    assert (horizontal.value(), vertical.value()) == scroll_position
+    assert not dialog.delete_button.isEnabled()
 
 
 def test_attempt_editor_changes_existing_attempt_in_place(
