@@ -1,4 +1,5 @@
 from __future__ import annotations
+from question_tracker.ui.bookmark_controls import BookmarkButton, install_bookmark_menu, toggle_default_bookmark
 
 from collections.abc import Callable
 
@@ -52,7 +53,6 @@ from question_tracker.ui.tracker_commands import (
     DeleteAttemptCommand,
     EditAttemptCommand,
     EditQuestionNoteCommand,
-    SetBookmarkCommand,
 )
 
 
@@ -101,11 +101,7 @@ class CompactQuestionStrip(QWidget):
             return
 
         row = 0
-        topics = sorted(
-            {span.topic for span in snapshot.topic_spans},
-            key=lambda topic: topic.sort_order,
-        )
-        topic_rows = {topic.id: row + index for index, topic in enumerate(topics)}
+        label_band_row = row
         for span in snapshot.topic_spans:
             label = QLabel(span.topic.title)
             label.setObjectName(
@@ -122,12 +118,12 @@ class CompactQuestionStrip(QWidget):
             )
             grid.addWidget(
                 label,
-                topic_rows[span.topic.id],
+                label_band_row,
                 span.start_column,
                 1,
                 span.end_column - span.start_column + 1,
             )
-        row += len(topics)
+        row += int(bool(snapshot.topic_spans))
 
         for heading_row in range(snapshot.heading_row_count):
             grid.setRowMinimumHeight(
@@ -246,7 +242,7 @@ class CompactTrackerWidget(QWidget):
             controls.addWidget(button)
             self.status_buttons[status] = button
         controls.addStretch()
-        self.bookmark_button = QPushButton("☆ Bookmark")
+        self.bookmark_button = BookmarkButton()
         self.bookmark_button.setObjectName("compactBookmarkButton")
         self.bookmark_button.clicked.connect(self._toggle_bookmark)
         self.note_button = QPushButton("Note")
@@ -273,6 +269,8 @@ class CompactTrackerWidget(QWidget):
         layout.addWidget(self.strip)
 
         self._populate_active_selector()
+        install_bookmark_menu(self.bookmark_button, service, undo_stack,
+                              lambda: self.selected_question_id, self.refresh)
         self._set_tracking_enabled(False)
 
     def install_shortcuts(
@@ -406,7 +404,7 @@ class CompactTrackerWidget(QWidget):
     def _update_selected_state(self) -> None:
         if self.snapshot is None or self.selected_question_id is None:
             self.position_label.setText("No selected question")
-            self.bookmark_button.setText("☆ Bookmark")
+            self.bookmark_button.refresh_state()
             self.note_button.setText("Note")
             return
         columns = list(self.snapshot.columns)
@@ -419,9 +417,7 @@ class CompactTrackerWidget(QWidget):
         self.position_label.setText(
             f"{index + 1}/{len(columns)} — {column.visible_label}"
         )
-        self.bookmark_button.setText(
-            "★ Bookmarked" if column.question.bookmarked else "☆ Bookmark"
-        )
+        self.bookmark_button.refresh_state()
         self.note_button.setText("Note ●" if column.question.note else "Note")
         self.note_button.setToolTip(
             column.question.note or "Edit selected question note"
@@ -438,15 +434,7 @@ class CompactTrackerWidget(QWidget):
     def _toggle_bookmark(self) -> None:
         if self.selected_question_id is None:
             return
-        question = self.service.get_question(self.selected_question_id)
-        self.undo_stack.push(
-            SetBookmarkCommand(
-                self.service,
-                question.id,
-                question.bookmarked,
-                not question.bookmarked,
-            )
-        )
+        toggle_default_bookmark(self.service, self.undo_stack, self.selected_question_id, self)
 
     def _edit_question_note(self) -> None:
         if self.selected_question_id is None:

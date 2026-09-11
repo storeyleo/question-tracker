@@ -37,6 +37,8 @@ class ReviewScreen(QWidget):
         self.filter_combo = QComboBox()
         for filter in ReviewFilter:
             self.filter_combo.addItem(filter.value, filter)
+        for item in service.list_bookmark_types():
+            self.filter_combo.addItem(f"Bookmark: {item.name}", f"bookmark:{item.id}")
         self.filter_combo.setCurrentIndex(self.filter_combo.findData(initial_filter))
         self.filter_combo.currentIndexChanged.connect(self._render_items)
         filters = QHBoxLayout()

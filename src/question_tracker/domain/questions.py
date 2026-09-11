@@ -20,7 +20,7 @@ class Question:
     local_label: str
     sort_order: int
     note: str = ""
-    bookmarked: bool = False
+    bookmarked: bool = False  # Derived "any bookmark type" summary in persisted views.
 
 
 def validate_question_structure(questions: Iterable[Question]) -> None:

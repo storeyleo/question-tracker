@@ -65,6 +65,7 @@ from question_tracker.domain.tracking import (
 from question_tracker.ui.colours import contrasting_text_colour
 from question_tracker.ui.tracker_appearance_dialog import TrackerAppearanceDialog
 from question_tracker.ui.question_editor import QuestionEditorDialog
+from question_tracker.ui.bookmark_controls import BookmarkButton, install_bookmark_menu, toggle_default_bookmark
 from question_tracker.ui.preferences import (
     UiPreferences, MIN_ZOOM_PERCENT, MAX_ZOOM_PERCENT, DEFAULT_ZOOM_PERCENT,
 )
@@ -74,7 +75,6 @@ from question_tracker.ui.tracker_commands import (
     DeleteAttemptsCommand,
     EditAttemptCommand,
     EditQuestionNoteCommand,
-    SetBookmarkCommand,
 )
 
 
@@ -789,7 +789,7 @@ class TrackerScreen(QWidget):
             self.status_buttons[status] = button
             selected_controls.addWidget(button)
 
-        self.bookmark_button = QPushButton("☆ Bookmark")
+        self.bookmark_button = BookmarkButton()
         self.bookmark_button.setObjectName("selectedBookmarkButton")
         self.bookmark_button.clicked.connect(
             lambda: self._toggle_bookmark(self.selected_question_id)
@@ -893,6 +893,8 @@ class TrackerScreen(QWidget):
         layout.addWidget(splitter)
 
         self._install_shortcuts()
+        install_bookmark_menu(self.bookmark_button, service, undo_stack,
+                              lambda: self.selected_question_id, self.refresh_current)
         self._set_marking_enabled(False)
         self._populate_navigation(initial_question_set_id)
         if initial_question_set_id is not None:
@@ -963,7 +965,7 @@ class TrackerScreen(QWidget):
         for cell_id, cell in self.question_cells.items():
             cell.set_selected(cell_id == question_id)
         question = self.question_cells[question_id].column.question
-        self.bookmark_button.setText("★ Bookmarked" if question.bookmarked else "☆ Bookmark")
+        self.bookmark_button.refresh_state()
         self.note_button.setText("Note ●" if question.note else "Note")
         self.note_button.setToolTip(question.note or "Edit selected question note")
         if reveal:
@@ -1115,13 +1117,7 @@ class TrackerScreen(QWidget):
             )
             row += 1
 
-            topics = sorted(
-                {span.topic for span in question_set_snapshot.topic_spans},
-                key=lambda topic: topic.sort_order,
-            )
-            topic_rows = {
-                topic.id: row + index for index, topic in enumerate(topics)
-            }
+            label_band_row = row
             for span in question_set_snapshot.topic_spans:
                 label = TopicBandLabel(span.topic.title, span.topic.colour, scale)
                 label.setObjectName(
@@ -1129,16 +1125,16 @@ class TrackerScreen(QWidget):
                 )
                 grid.addWidget(
                     label,
-                    topic_rows[span.topic.id],
+                    label_band_row,
                     span.start_column,
                     1,
                     span.end_column - span.start_column + 1,
                 )
                 grid.setRowMinimumHeight(
-                    topic_rows[span.topic.id],
+                    label_band_row,
                     _scaled(metrics.topic_row_height + metrics.topic_spacing, scale),
                 )
-            row += len(topics)
+            row += int(bool(question_set_snapshot.topic_spans))
 
             heading_start_row = row
             for heading_row in range(question_set_snapshot.heading_row_count):
@@ -1526,15 +1522,7 @@ class TrackerScreen(QWidget):
 
     def _toggle_bookmark(self, question_id: str) -> None:
         self.select_question(question_id)
-        question = self.service.get_question(question_id)
-        self.undo_stack.push(
-            SetBookmarkCommand(
-                self.service,
-                question_id,
-                question.bookmarked,
-                not question.bookmarked,
-            )
-        )
+        toggle_default_bookmark(self.service, self.undo_stack, question_id, self)
 
     def _edit_question_note(self, question_id: str) -> None:
         self.select_question(question_id)

@@ -23,7 +23,7 @@ def test_topic_rows_and_spans_stay_aligned_across_zoom(
         leaves.extend(tracking_service.add_child(root.id, label) for label in labels)
     leaves.append(tracking_service.create_question(question_set.id, "3"))
     first = tracking_service.create_topic(question_set.id, "Discontinuous topic", colour="#123456")
-    second = tracking_service.create_topic(question_set.id, "Overlapping topic", colour="#fedcba")
+    second = tracking_service.create_topic(question_set.id, "Replacement label", colour="#fedcba")
     for index in (0, 1, 4, 5):
         tracking_service.assign_topic(leaves[index].id, first.id)
     for index in (1, 2, 3):
@@ -31,9 +31,9 @@ def test_topic_rows_and_spans_stay_aligned_across_zoom(
     before = build_tracker_snapshot(tracking_service, question_set.id)
     saved_topics = tracking_service.list_topics(question_set.id)
     assert [(span.topic.id, span.start_column, span.end_column) for span in before.topic_spans] == [
-        (first.id, 0, 1), (first.id, 4, 5), (second.id, 1, 3),
+        (first.id, 0, 0), (first.id, 4, 5), (second.id, 1, 3),
     ]
-    assert before.columns[1].topic_ids == frozenset((first.id, second.id))
+    assert before.columns[1].topic_ids == frozenset((second.id,))
     screen = tracker.TrackerScreen(
         tracking_service, library_service, QUndoStack(), initial_question_set_id=question_set.id
     )
@@ -46,7 +46,7 @@ def test_topic_rows_and_spans_stay_aligned_across_zoom(
         content = screen.tracker_scroll.widget()
         grid = content.layout()
         assert len(content.findChildren(tracker.TopicBandLabel)) == 3
-        topic_rows = {first.id: 1, second.id: 2}
+        label_band_row = 1
         for span in before.topic_spans:
             band = content.findChild(
                 tracker.TopicBandLabel,
@@ -54,7 +54,7 @@ def test_topic_rows_and_spans_stay_aligned_across_zoom(
             )
             assert band.parentWidget() is content  # Shares the question scroll container.
             assert grid.getItemPosition(grid.indexOf(band)) == (
-                topic_rows[span.topic.id], span.start_column, 1,
+                label_band_row, span.start_column, 1,
                 span.end_column - span.start_column + 1,
             )
             assert band.topic_colour.name() == span.topic.colour.lower()
@@ -65,11 +65,11 @@ def test_topic_rows_and_spans_stay_aligned_across_zoom(
         for span in before.hierarchy_headings:
             heading = screen.hierarchy_headings[span.question.id]
             assert grid.getItemPosition(grid.indexOf(heading)) == (
-                3 + span.depth, span.start_column, 1, span.end_column - span.start_column + 1,
+                2 + span.depth, span.start_column, 1, span.end_column - span.start_column + 1,
             )
         cells = [screen.question_cells[leaf.id] for leaf in leaves]
         for index, cell in enumerate(cells):
-            assert grid.getItemPosition(grid.indexOf(cell)) == (5, index, 1, 1)
+            assert grid.getItemPosition(grid.indexOf(cell)) == (4, index, 1, 1)
         assert len({cell.attempt_stack.mapTo(content, QPoint()).y() for cell in cells}) == 1
         assert build_tracker_snapshot(tracking_service, question_set.id) == before
         assert tracking_service.list_topics(question_set.id) == saved_topics
@@ -91,3 +91,43 @@ def test_topic_colour_keeps_a_contrasting_outline(qtbot, qapp, colour):
     assert band.contrast_colour != band.topic_colour
     assert not band.autoFillBackground()
     assert band.styleSheet() == ""
+
+
+@pytest.mark.parametrize("compact", [False, True])
+def test_single_label_band_refreshes_replacement_and_clearing(qtbot, tracking_service, library_service, compact):
+    from PySide6.QtWidgets import QLabel
+    from question_tracker.ui.marking import MarkingWorkspace
+    service = tracking_service
+    question_set = service.create_question_set(QuestionSetKind.PROBLEM_SHEET, "Band", setup_state=SetupState.READY)
+    leaves = [service.create_question(question_set.id, str(i)) for i in range(4)]
+    labels = [service.create_topic(question_set.id, name) for name in ("Bases", "Vectors", "Eigenvectors")]
+    for leaf, label in zip(leaves, (labels[0], labels[0], labels[1], labels[2])):
+        service.set_question_label(leaf.id, label.id)
+    cls = MarkingWorkspace if compact else tracker.TrackerScreen
+    screen = cls(service, library_service, QUndoStack(), initial_question_set_id=question_set.id)
+    qtbot.addWidget(screen)
+
+    def verify(expected):
+        if compact:
+            screen.compact_tracker.refresh()
+            content = screen.compact_tracker.strip._scroll.widget()
+            prefix = "compactTopicSpan-"
+            bands = [w for w in content.findChildren(QLabel) if w.objectName().startswith(prefix)]
+        else:
+            screen.refresh_current()
+            content = screen.tracker_scroll.widget()
+            bands = content.findChildren(tracker.TopicBandLabel)
+        assert len(bands) == expected
+        positions = [content.layout().getItemPosition(content.layout().indexOf(band)) for band in bands]
+        assert len({pos[0] for pos in positions}) <= 1
+        covered = [column for _, start, _, count in positions for column in range(start, start + count)]
+        assert len(covered) == len(set(covered))
+
+    verify(3)
+    service.set_question_label(leaves[2].id, labels[0].id)
+    verify(2)
+    service.set_question_label(leaves[3].id, None)
+    verify(1)
+    for leaf in leaves:
+        service.set_question_label(leaf.id, None)
+    verify(0)

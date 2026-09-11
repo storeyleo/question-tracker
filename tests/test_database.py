@@ -17,6 +17,8 @@ EXPECTED_TABLES = {
     "topics",
     "module_groups",
     "module_group_assignments",
+    "bookmark_types",
+    "question_bookmarks",
 }
 
 
@@ -58,6 +60,7 @@ def test_database_initialization_creates_schema(
         {"version": 3, "name": "003_topic_colour.sql"},
         {"version": 4, "name": "004_file_hash.sql"},
         {"version": 5, "name": "005_module_groups.sql"},
+        {"version": 6, "name": "006_question_labels_bookmark_types.sql"},
     ]
     assert foreign_keys == 1
 
@@ -75,4 +78,4 @@ def test_database_initialization_is_idempotent(
             "SELECT count(*) FROM schema_migrations"
         ).fetchone()[0]
 
-    assert migration_count == 5
+    assert migration_count == 6

@@ -87,7 +87,7 @@ class QuestionEditorDialog(QDialog):
         self.question_tree = QTreeWidget()
         self.question_tree.setObjectName("questionTree")
         self.question_tree.setColumnCount(2)
-        self.question_tree.setHeaderLabels(("Question hierarchy", "Topics"))
+        self.question_tree.setHeaderLabels(("Question hierarchy", "Label"))
         self.question_tree.setAlternatingRowColors(True)
         self.question_tree.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection
@@ -204,11 +204,11 @@ class QuestionEditorDialog(QDialog):
         self.assignment_list = QListWidget()
         self.assignment_list.setObjectName("topicAssignmentList")
         self.assignment_list.itemChanged.connect(self._assignment_changed)
-        topics = QGroupBox("Topics")
+        topics = QGroupBox("Labels")
         topics_layout = QVBoxLayout(topics)
         topics_layout.addWidget(self.topic_list)
         topics_layout.addLayout(topic_buttons)
-        self.assignment_heading = QLabel("Assignments for selected leaf question(s)")
+        self.assignment_heading = QLabel("Label for selected leaves (a new choice replaces the previous label)")
         self.assignment_heading.setWordWrap(True)
         topics_layout.addWidget(self.assignment_heading)
         topics_layout.addWidget(self.assignment_list)
@@ -352,7 +352,10 @@ class QuestionEditorDialog(QDialog):
                 self.bookmark_check.setChecked(False)
             else:
                 self.question_note_edit.setPlainText(question.note)
-                self.bookmark_check.setChecked(question.bookmarked)
+                types = self.service.list_bookmark_types()
+                self.bookmark_check.setText(types[0].name if types else "No bookmark types")
+                self.bookmark_check.setEnabled(bool(types))
+                self.bookmark_check.setChecked(self.service.has_default_bookmark(question.id))
         finally:
             self._loading_question_details = False
         self._refresh_assignments()
@@ -419,8 +422,8 @@ class QuestionEditorDialog(QDialog):
                 self.assignment_list.addItem(item)
             self.assignment_list.setEnabled(assignable)
             self.assignment_heading.setText(
-                f"Assignments for {len(selected_leaf_ids)} selected leaf"
-                f"{'s' if len(selected_leaf_ids) != 1 else ''}"
+                f"One label per leaf — {len(selected_leaf_ids)} selected. "
+                "Checking a label replaces the previous choice."
             )
         finally:
             self._updating_assignments = False
@@ -642,20 +645,20 @@ class QuestionEditorDialog(QDialog):
         current = next(
             question for question in self._questions if question.id == question_id
         )
-        if current.bookmarked == checked:
+        if self.service.has_default_bookmark(question_id) == checked:
             return
-        saved = self._run(lambda: self.service.toggle_question_bookmark(question_id))
+        saved = self._run(lambda: self.service.set_question_bookmark(question_id, checked))
         if isinstance(saved, Question):
             self._replace_cached_question(saved)
             return
         self._loading_question_details = True
         try:
-            self.bookmark_check.setChecked(current.bookmarked)
+            self.bookmark_check.setChecked(self.service.has_default_bookmark(current.id))
         finally:
             self._loading_question_details = False
 
     def _add_topic(self) -> None:
-        title = self._ask_text("Add topic", "Title")
+        title = self._ask_text("Add label", "Title")
         if title is None:
             return
         topic = self._run(lambda: self.service.create_topic(self.question_set_id, title))
@@ -667,7 +670,7 @@ class QuestionEditorDialog(QDialog):
         if topic_id is None:
             return
         topic = self.service.get_topic(topic_id)
-        title = self._ask_text("Rename topic", "Title", topic.title)
+        title = self._ask_text("Rename label", "Title", topic.title)
         if title is None:
             return
         if self._run(lambda: self.service.rename_topic(topic_id, title)) is not None:
@@ -680,8 +683,8 @@ class QuestionEditorDialog(QDialog):
         if (
             QMessageBox.question(
                 self,
-                "Delete topic",
-                "Delete this topic and remove all of its assignments?",
+                "Delete label",
+                "Delete this label and remove all of its assignments?",
             )
             != QMessageBox.StandardButton.Yes
         ):
@@ -734,9 +737,9 @@ class QuestionEditorDialog(QDialog):
             return
         topic_id = str(item.data(Qt.ItemDataRole.UserRole))
         assigned = item.checkState() == Qt.CheckState.Checked
-        operation = lambda: self.service.set_topic_assignments(
-            question_ids, topic_id, assigned
-        )
+        if not assigned:
+            question_ids = tuple(qid for qid in question_ids if topic_id in self.service.topic_ids_for_question(qid))
+        operation = lambda: self.service.set_question_labels(question_ids, topic_id if assigned else None)
         if self._run(operation, none_is_success=True) is False:
             self._refresh_assignments()
             return

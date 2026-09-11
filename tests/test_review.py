@@ -131,7 +131,8 @@ def test_snapshot_batches_queries_not_per_leaf(database, tracking_service, revie
         return connection
     monkeypatch.setattr(database, "connect", traced)
     ReviewService(database).snapshot()
-    assert len([statement for statement in statements if statement.lstrip().upper().startswith("SELECT")]) == 3
+    # Sets, questions, latest attempts, and one batch for typed bookmarks.
+    assert len([statement for statement in statements if statement.lstrip().upper().startswith("SELECT")]) == 4
 
 
 @pytest.mark.parametrize("destination", ("tracker", "marking"))

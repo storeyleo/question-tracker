@@ -139,11 +139,11 @@ def test_topic_assignments_form_contiguous_and_discontinuous_spans(
         (span.topic.id, span.start_column, span.end_column)
         for span in snapshot.topic_spans
     ] == [
-        (bases.id, 0, 1),
+        (bases.id, 0, 0),
         (bases.id, 3, 4),
         (proofs.id, 1, 2),
     ]
-    assert snapshot.columns[1].topic_ids == frozenset({bases.id, proofs.id})
+    assert snapshot.columns[1].topic_ids == frozenset({proofs.id})
     assert snapshot.topic_spans[0].topic.colour == "#123456"
 
 

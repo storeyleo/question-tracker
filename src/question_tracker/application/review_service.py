@@ -14,6 +14,7 @@ from question_tracker.domain.tracking import (
 )
 from question_tracker.persistence.database import Database
 from question_tracker.persistence.tracking_repository import TrackingRepository
+from question_tracker.persistence.bookmark_repository import BookmarkRepository
 
 
 class ReviewFilter(str, Enum):
@@ -53,6 +54,7 @@ class ReviewItem:
     question: Question
     label: str
     latest: Attempt | None
+    bookmark_type_ids: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +73,9 @@ class ModuleProgressSummary:
     items: tuple[ReviewItem, ...]
 
     def review_items(self, filter: ReviewFilter | str = ReviewFilter.REATTEMPT) -> tuple[ReviewItem, ...]:
+        if isinstance(filter, str) and filter.startswith("bookmark:"):
+            type_id = filter.removeprefix("bookmark:")
+            return tuple(item for item in self.items if type_id in item.bookmark_type_ids)
         filter = ReviewFilter(filter)  # Qt may return str-enum item data as plain text.
         def matches(item: ReviewItem) -> bool:
             if filter is ReviewFilter.BOOKMARKED:
@@ -98,6 +103,10 @@ class ReviewService:
     def __init__(self, database: Database):
         self.database = database
 
+    def list_bookmark_types(self):
+        with self.database.read() as connection:
+            return BookmarkRepository(connection).types()
+
     def snapshot(self) -> tuple[ModuleProgressSummary, ...]:
         with self.database.read() as connection:
             connection.execute("BEGIN")  # One consistent read across all batches.
@@ -106,6 +115,9 @@ class ReviewService:
             questions, attempts = repository.review_questions_and_latest(tuple(
                 item.id for item, _ in sets if item.setup_state is SetupState.READY
             ))
+            bookmark_ids = defaultdict(set)
+            for row in connection.execute("SELECT question_id, bookmark_type_id FROM question_bookmarks"):
+                bookmark_ids[row[0]].add(row[1])
         by_set = defaultdict(list)
         for question in questions:
             by_set[question.question_set_id].append(question)
@@ -133,6 +145,7 @@ class ReviewService:
                 set_items = tuple(ReviewItem(
                     module, question_set, leaf,
                     visible_question_label(leaf.id, set_questions), latest.get(leaf.id),
+                    frozenset(bookmark_ids[leaf.id]),
                 ) for leaf in leaves)
                 progress = calculate_progress(question_set, set_questions, tuple(
                     latest[leaf.id] for leaf in leaves if leaf.id in latest

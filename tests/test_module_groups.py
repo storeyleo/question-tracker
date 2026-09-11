@@ -76,9 +76,12 @@ def test_v4_database_upgrade_preserves_existing_rows(database, tracking_service)
     from question_tracker.domain.tracking import QuestionSetKind
     question_set = tracking_service.create_question_set(QuestionSetKind.PROBLEM_SHEET, "Existing")
     with database.transaction() as connection:
+        connection.execute("DROP TABLE question_bookmarks")
+        connection.execute("DROP TABLE bookmark_types")
+        connection.execute("DROP INDEX uq_question_single_label")
         connection.execute("DROP TABLE module_group_assignments")
         connection.execute("DROP TABLE module_groups")
-        connection.execute("DELETE FROM schema_migrations WHERE version=5")
+        connection.execute("DELETE FROM schema_migrations WHERE version>=5")
     database.initialize()
     database.initialize()
     assert tracking_service.get_question_set(question_set.id) == question_set

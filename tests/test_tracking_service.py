@@ -227,7 +227,6 @@ def test_split_leaf_transfers_attempt_note_bookmark_and_topics(
     assert updated_child.note == "Important method"
     assert updated_child.bookmarked is True
     assert set(tracking_service.topic_ids_for_question(child.id)) == {
-        first_topic.id,
         second_topic.id,
     }
     assert tracking_service.topic_ids_for_question(parent.id) == ()
@@ -335,7 +334,7 @@ def test_move_history_requires_policy_when_both_questions_have_notes(
     assert tracking_service.get_question(target.id).note == "Target note"
 
 
-def test_topics_can_be_renamed_reordered_assigned_multiple_and_removed(
+def test_topics_can_be_renamed_reordered_replaced_and_removed(
     tracking_service: TrackingService,
 ) -> None:
     question_set = create_set(tracking_service)
@@ -356,7 +355,6 @@ def test_topics_can_be_renamed_reordered_assigned_multiple_and_removed(
         first.id,
     ]
     assert set(tracking_service.topic_ids_for_question(question.id)) == {
-        first.id,
         second.id,
     }
 
@@ -386,7 +384,6 @@ def test_topic_lifecycle_and_colour_persist_across_service_restart(
         (first.id, "First", DEFAULT_TOPIC_COLOUR),
     ]
     assert set(restarted.topic_ids_for_question(question.id)) == {
-        first.id,
         second.id,
     }
 

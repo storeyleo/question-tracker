@@ -346,6 +346,9 @@ def test_older_bundle_is_migrated_on_staged_copy(tmp_path):
         connection.execute("ALTER TABLE managed_files DROP COLUMN sha256")
         connection.execute("DROP TABLE module_group_assignments")
         connection.execute("DROP TABLE module_groups")
+        connection.execute("DROP TABLE question_bookmarks")
+        connection.execute("DROP TABLE bookmark_types")
+        connection.execute("DROP INDEX uq_question_single_label")
         connection.execute("DELETE FROM schema_migrations WHERE version>=4")
         connection.commit()
     manifest["schema_version"] = 3
@@ -354,6 +357,6 @@ def test_older_bundle_is_migrated_on_staged_copy(tmp_path):
     before = rows(paths.database_path)
     with service.prepare_import(bundle) as staged:
         with closing(sqlite3.connect(staged / "database.sqlite3")) as connection:
-            assert connection.execute("SELECT max(version) FROM schema_migrations").fetchone()[0] == 5
+            assert connection.execute("SELECT max(version) FROM schema_migrations").fetchone()[0] == 6
             assert "sha256" in {row[1] for row in connection.execute("PRAGMA table_info(managed_files)")}
     assert rows(paths.database_path) == before

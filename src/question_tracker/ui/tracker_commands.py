@@ -98,18 +98,20 @@ class SetBookmarkCommand(QUndoCommand):
         question_id: str,
         before: bool,
         after: bool,
+        *, bookmark_type_id: str | None = None,
     ) -> None:
         super().__init__("Toggle question bookmark")
         self.service = service
         self.question_id = question_id
         self.before = before
         self.after = after
+        self.bookmark_type_id = bookmark_type_id or service.list_bookmark_types()[0].id
 
     def redo(self) -> None:
-        self.service.set_question_bookmark(self.question_id, self.after)
+        self.service.set_question_bookmark(self.question_id, self.after, bookmark_type_id=self.bookmark_type_id)
 
     def undo(self) -> None:
-        self.service.set_question_bookmark(self.question_id, self.before)
+        self.service.set_question_bookmark(self.question_id, self.before, bookmark_type_id=self.bookmark_type_id)
 
 
 class EditQuestionNoteCommand(QUndoCommand):

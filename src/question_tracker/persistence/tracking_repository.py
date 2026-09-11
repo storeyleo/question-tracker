@@ -142,11 +142,14 @@ class TrackingRepository:
                 question.local_label,
                 question.sort_order,
                 question.note,
-                int(question.bookmarked),
+                0,
                 now,
                 now,
             ),
         )
+
+        if question.bookmarked:
+            self.update_question_bookmark(question.id, True, now)
 
     def get_question(self, question_id: str) -> Question | None:
         row = self.connection.execute(
@@ -192,10 +195,12 @@ class TrackingRepository:
     def update_question_bookmark(
         self, question_id: str, bookmarked: bool, now: str
     ) -> None:
-        self.connection.execute(
-            "UPDATE questions SET bookmarked = ?, updated_at_utc = ? WHERE id = ?",
-            (int(bookmarked), now, question_id),
-        )
+        from question_tracker.persistence.bookmark_repository import BookmarkRepository
+        bookmarks = BookmarkRepository(self.connection)
+        types = bookmarks.types()
+        if types:
+            bookmarks.set(question_id, types[0].id, bookmarked)
+        self.connection.execute("UPDATE questions SET updated_at_utc=? WHERE id=?", (now, question_id))
 
     def delete_question(self, question_id: str) -> None:
         self.connection.execute("DELETE FROM questions WHERE id = ?", (question_id,))
@@ -255,9 +260,10 @@ class TrackingRepository:
     ) -> None:
         self.connection.execute(
             """
-            INSERT OR IGNORE INTO question_topics (
+            INSERT INTO question_topics (
                 question_id, topic_id, question_set_id
             ) VALUES (?, ?, ?)
+            ON CONFLICT(question_id) DO UPDATE SET topic_id=excluded.topic_id
             """,
             (question_id, topic_id, question_set_id),
         )
@@ -290,8 +296,10 @@ class TrackingRepository:
             INSERT OR IGNORE INTO question_topics (
                 question_id, topic_id, question_set_id
             )
-            SELECT ?, topic_id, ? FROM question_topics
-            WHERE question_id IN ({placeholders})
+            SELECT ?, qt.topic_id, ? FROM question_topics qt
+            JOIN topics t ON t.id=qt.topic_id
+            WHERE qt.question_id IN ({placeholders})
+            ORDER BY t.sort_order, t.id LIMIT 1
             """,
             (target_id, question_set_id, *source_ids),
         )

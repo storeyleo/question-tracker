@@ -145,9 +145,13 @@ options to:
 
 ---
 
-## Topic Headings
+## Question Labels (stored as topics)
 
-Questions may belong to multiple topic headings.
+Each leaf question may have zero or one flat classification label. The reusable
+topic entities are these labels, not question numbers or structural hierarchy
+headings. Existing topic IDs, per-question-set scope, sort order and colours
+remain. A unique question_topics(question_id) index enforces zero-or-one
+assignment without replacing the existing tables.
 
 Examples:
 
@@ -157,12 +161,23 @@ Examples:
 
 Headings are manually created and assigned.
 
-They contain a title only.
+Labels have a title and their existing colour. Assigning a new label replaces
+the old assignment atomically; clearing or deleting a label leaves the question
+unlabelled. Labels are reusable across many leaves and are not inherited from
+parents. Selecting parents in the editor still applies the choice to their
+descendant leaves. Structural root/second-level headings remain separate.
 
 In the tracker UI, headings should visually span the questions assigned to
 them.
 
 Topic headings should be reorderable.
+
+Migration 006 retains the assigned topic with lowest sort_order, then stable ID,
+when old data has multiple assignments. Other assignments are removed but every
+topic definition and all tracking data are retained. During history transfers,
+an existing destination label wins; an unlabelled destination receives the
+lowest-sort-order source label. A split transfers the source label to its first
+child. Label editing retains its existing non-undoable service behaviour.
 
 ---
 
@@ -247,11 +262,27 @@ Three levels of notes are supported:
 Question and attempt notes should normally appear only when clicked or hovered
 rather than permanently occupying tracker space.
 
-Questions can also be bookmarked.
+Questions (including parents) may carry multiple independent bookmark types.
+Migration 006 creates UUID-backed Bookmark, Revisit and Important type records
+and a question_bookmarks join table. Every old true bookmark becomes a Bookmark
+assignment; old false values remain unbookmarked. The old boolean column and
+Question.bookmarked are compatibility summaries maintained by assignment
+triggers, not independent writable bookmark state. Deleting questions or types
+cascades only the corresponding assignments.
 
-A bookmark means:
+The existing Tracker/Marking bookmark button quickly toggles the first type in
+stored order. The visible dropdown arrow opens checkable type actions and a small management
+dialog. Names are trimmed, non-empty and case-insensitively unique. Renames
+preserve identity. Deletion is confirmed and removes only that type's markers;
+the dialog clears Undo/Redo history so commands cannot reference a deleted type.
+If the first type is deleted, the next becomes the quick-toggle type; if all are
+deleted, clicking opens management to create a type. The editor's checkbox also
+toggles this first type, without affecting other types.
 
-"This question was useful and I should return to it when revising."
+Bookmark toggles use the existing shared undo stack and restore only the chosen
+type. History transfers union all types. Review's Bookmarked filter includes
+any marker, and individual type filters use stored type names. Service APIs
+also query all bookmarked questions or one type independently.
 
 Bookmarks are independent of attempt colour/status.
 
@@ -493,3 +524,7 @@ mouse buttons are unchanged. New destinations discard forward history; bundle
 replacement resets history. History records tracker question selection and
 Review module/filter state when leaving a screen, rather than retaining old
 widgets. It does not record every internal pane, scroll, or tree interaction.
+
+The bookmark control distinguishes default-on from other-types-only and lists active types in its tooltip. Dropdown checkmarks reload for the selected question on opening, including after Undo/Redo.
+
+Used labels share one horizontal grid band in Tracker and compact Marking. Each contiguous run keeps its column span; non-contiguous assignments never span intervening questions with another label. Unused labels add no widget.

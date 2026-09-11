@@ -141,7 +141,7 @@ def test_valid_setup_can_be_finished_from_editor(
     assert saved.general_note == "Review on Friday"
 
 
-def test_question_details_and_multiple_topic_assignments_are_saved(
+def test_question_details_and_replacement_label_are_saved(
     qtbot, tracking_service: TrackingService
 ) -> None:
     question_set = _new_set(tracking_service)
@@ -160,7 +160,6 @@ def test_question_details_and_multiple_topic_assignments_are_saved(
     assert saved_question.note == "Useful substitution"
     assert saved_question.bookmarked is True
     assert set(tracking_service.topic_ids_for_question(question.id)) == {
-        first_topic.id,
         second_topic.id,
     }
 
@@ -251,34 +250,43 @@ def test_shift_range_containing_parents_can_receive_topic(
         assert tracking_service.topic_ids_for_question(leaf.id) == (topic.id,)
 
 
-def test_topic_badges_and_colour_refresh_immediately(
+def test_single_label_badge_replacement_colour_and_clearing_refresh_immediately(
     qtbot, monkeypatch, tracking_service: TrackingService
 ) -> None:
     question_set = _new_set(tracking_service)
     question = tracking_service.create_question(question_set.id, "1")
     first = tracking_service.create_topic(question_set.id, "Bases")
     second = tracking_service.create_topic(question_set.id, "Vectors")
-    tracking_service.assign_topic(question.id, first.id)
-    tracking_service.assign_topic(question.id, second.id)
     dialog = QuestionEditorDialog(tracking_service, question_set.id)
     qtbot.addWidget(dialog)
 
+    assert tracking_service.get_question_label(question.id) is None
+    assert dialog.findChild(QLabel, f"topicBadge-{question.id}-{first.id}") is None
+    assert dialog.findChild(QLabel, f"topicBadge-{question.id}-{second.id}") is None
+    # Use the editor's assignment action, which calls set_question_labels and
+    # refreshes badges synchronously; no manual refresh hides a UI regression.
+    dialog.assignment_list.item(0).setCheckState(Qt.CheckState.Checked)
+    assert tracking_service.get_question_label(question.id).id == first.id
     assert dialog.findChild(QLabel, f"topicBadge-{question.id}-{first.id}")
+    dialog.assignment_list.item(1).setCheckState(Qt.CheckState.Checked)
+    assert tracking_service.get_question_label(question.id).id == second.id
+    assert dialog.findChild(QLabel, f"topicBadge-{question.id}-{first.id}") is None
     assert dialog.findChild(QLabel, f"topicBadge-{question.id}-{second.id}")
     monkeypatch.setattr(
         QColorDialog, "getColor", lambda *args, **kwargs: QColor("#112233")
     )
-    dialog.topic_list.setCurrentRow(0)
+    dialog.topic_list.setCurrentRow(1)
     qtbot.mouseClick(dialog.topic_colour_button, Qt.MouseButton.LeftButton)
 
-    assert tracking_service.get_topic(first.id).colour == "#112233"
-    badge = dialog.findChild(QLabel, f"topicBadge-{question.id}-{first.id}")
+    assert tracking_service.get_topic(second.id).colour == "#112233"
+    badge = dialog.findChild(QLabel, f"topicBadge-{question.id}-{second.id}")
     assert "background: #112233" in badge.styleSheet()
     assert "color: #FFFFFF" in badge.styleSheet()
 
-    dialog.assignment_list.item(0).setCheckState(Qt.CheckState.Unchecked)
-    assert tracking_service.topic_ids_for_question(question.id) == (second.id,)
+    dialog.assignment_list.item(1).setCheckState(Qt.CheckState.Unchecked)
+    assert tracking_service.get_question_label(question.id) is None
     assert dialog.findChild(QLabel, f"topicBadge-{question.id}-{first.id}") is None
+    assert dialog.findChild(QLabel, f"topicBadge-{question.id}-{second.id}") is None
 
 
 def test_editor_reset_actions_use_confirmed_service_operations(

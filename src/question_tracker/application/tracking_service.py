@@ -31,6 +31,8 @@ from question_tracker.domain.tracking import (
 )
 from question_tracker.persistence.database import Database
 from question_tracker.persistence.tracking_repository import TrackingRepository
+from question_tracker.persistence.bookmark_repository import BookmarkRepository
+from question_tracker.domain.bookmarks import BookmarkType
 
 
 class TrackingError(RuntimeError):
@@ -350,22 +352,84 @@ class TrackingService:
     def toggle_question_bookmark(self, question_id: str) -> Question:
         with self.database.transaction() as connection:
             repository = TrackingRepository(connection)
-            question = _require_question(repository, question_id)
+            _require_question(repository, question_id)
+            bookmarks = BookmarkRepository(connection)
+            types = bookmarks.types()
+            if not types:
+                raise ValidationError("Create a bookmark type first")
             repository.update_question_bookmark(
-                question_id, not question.bookmarked, _time_text(_utc_now())
+                question_id, types[0].id not in bookmarks.ids_for_question(question_id), _time_text(_utc_now())
             )
             return _require_question(repository, question_id)
 
-    def set_question_bookmark(self, question_id: str, bookmarked: bool) -> Question:
+    def set_question_bookmark(self, question_id: str, bookmarked: bool, *, bookmark_type_id: str | None = None) -> Question:
         if not isinstance(bookmarked, bool):
             raise ValidationError("Bookmark state must be true or false")
         with self.database.transaction() as connection:
             repository = TrackingRepository(connection)
             _require_question(repository, question_id)
-            repository.update_question_bookmark(
-                question_id, bookmarked, _time_text(_utc_now())
-            )
+            bookmarks = BookmarkRepository(connection)
+            types = bookmarks.types()
+            type_id = bookmark_type_id if bookmark_type_id is not None else (types[0].id if types else None)
+            if type_id not in {item.id for item in types}:
+                raise NotFoundError("Bookmark type not found")
+            bookmarks.set(question_id, type_id, bookmarked)
             return _require_question(repository, question_id)
+
+    def list_bookmark_types(self) -> tuple[BookmarkType, ...]:
+        with self.database.read() as connection:
+            return BookmarkRepository(connection).types()
+
+    def has_default_bookmark(self, question_id: str) -> bool:
+        types = self.list_bookmark_types()
+        return bool(types and types[0].id in {t.id for t in self.get_question_bookmarks(question_id)})
+
+    def create_bookmark_type(self, name: str) -> BookmarkType:
+        name = _required_text(name, "Bookmark type name")
+        with self.database.transaction() as connection:
+            repo = BookmarkRepository(connection)
+            item = BookmarkType(str(uuid4()), name, max((t.sort_order for t in repo.types()), default=-1) + 1)
+            try:
+                repo.save_type(item)
+            except sqlite3.IntegrityError as error:
+                raise ValidationError("Bookmark type names must be unique") from error
+            return item
+
+    def rename_bookmark_type(self, type_id: str, name: str) -> BookmarkType:
+        name = _required_text(name, "Bookmark type name")
+        with self.database.transaction() as connection:
+            repo = BookmarkRepository(connection)
+            old = next((t for t in repo.types() if t.id == type_id), None)
+            if old is None:
+                raise NotFoundError("Bookmark type not found")
+            item = BookmarkType(old.id, name, old.sort_order)
+            try:
+                repo.save_type(item)
+            except sqlite3.IntegrityError as error:
+                raise ValidationError("Bookmark type names must be unique") from error
+            return item
+
+    def delete_bookmark_type(self, type_id: str) -> None:
+        with self.database.transaction() as connection:
+            repo = BookmarkRepository(connection)
+            if type_id not in {t.id for t in repo.types()}:
+                raise NotFoundError("Bookmark type not found")
+            repo.delete_type(type_id)
+
+    def get_question_bookmarks(self, question_id: str) -> tuple[BookmarkType, ...]:
+        with self.database.read() as connection:
+            _require_question(TrackingRepository(connection), question_id)
+            repo = BookmarkRepository(connection)
+            ids = repo.ids_for_question(question_id)
+            return tuple(t for t in repo.types() if t.id in ids)
+
+    def list_bookmarked_questions(self, bookmark_type_id: str | None = None) -> tuple[Question, ...]:
+        with self.database.read() as connection:
+            bookmarks = BookmarkRepository(connection)
+            if bookmark_type_id is not None and bookmark_type_id not in {t.id for t in bookmarks.types()}:
+                raise NotFoundError("Bookmark type not found")
+            repo = TrackingRepository(connection)
+            return tuple(_require_question(repo, qid) for qid in bookmarks.question_ids(bookmark_type_id))
 
     def delete_question_permanently(self, question_id: str) -> None:
         with self.database.transaction() as connection:
@@ -532,10 +596,22 @@ class TrackingService:
             return _require_topic(TrackingRepository(connection), topic_id)
 
     def assign_topic(self, question_id: str, topic_id: str) -> None:
+        """Compatibility alias: assigning replaces the question's previous label."""
+        self.set_question_label(question_id, topic_id)
+
+    def get_question_label(self, question_id: str) -> Topic | None:
+        ids = self.topic_ids_for_question(question_id)
+        return self.get_topic(ids[0]) if ids else None
+
+    def set_question_label(self, question_id: str, label_id: str | None) -> None:
         with self.database.transaction() as connection:
             repository = TrackingRepository(connection)
             question = _require_question(repository, question_id)
-            topic = _require_topic(repository, topic_id)
+            if label_id is None:
+                for current in repository.topic_ids_for_question(question_id):
+                    repository.remove_topic_assignment(question_id, current)
+                return
+            topic = _require_topic(repository, label_id)
             if question.question_set_id != topic.question_set_id:
                 raise ValidationError("Topic and question must belong to the same set")
             questions = repository.list_questions(question.question_set_id)
@@ -559,7 +635,7 @@ class TrackingService:
     def set_topic_assignments(
         self, question_ids: tuple[str, ...], topic_id: str, assigned: bool
     ) -> None:
-        """Apply a multi-selection checkbox change atomically."""
+        """Replace each selected leaf's label, or clear only the specified label."""
         with self.database.transaction() as connection:
             repository = TrackingRepository(connection)
             topic = _require_topic(repository, topic_id)
@@ -574,6 +650,18 @@ class TrackingService:
                     repository.assign_topic(question_id, topic.id, topic.question_set_id)
                 else:
                     repository.remove_topic_assignment(question_id, topic.id)
+
+    def set_question_labels(self, question_ids: tuple[str, ...], label_id: str | None) -> None:
+        """Set one reusable label (or none) for each selected leaf atomically."""
+        if label_id is not None:
+            self.set_topic_assignments(question_ids, label_id, True)
+            return
+        with self.database.transaction() as connection:
+            repo = TrackingRepository(connection)
+            for question_id in question_ids:
+                _require_question(repo, question_id)
+                for current in repo.topic_ids_for_question(question_id):
+                    repo.remove_topic_assignment(question_id, current)
 
     def effective_leaf_question_ids(
         self, question_set_id: str, selected_question_ids: tuple[str, ...]
@@ -882,15 +970,12 @@ def _transfer_history(
     resolved_note = _resolve_note_conflict(
         target.note, source_notes, note_conflict_policy
     )
-    merged_bookmark = target.bookmarked or any(source.bookmarked for source in sources)
-
     repository.transfer_attempts(source_ids, target.id, now)
     repository.transfer_topic_assignments(source_ids, target.id, target.question_set_id)
     repository.update_question_note(target.id, resolved_note, now)
-    repository.update_question_bookmark(target.id, merged_bookmark, now)
+    BookmarkRepository(repository.connection).transfer(source_ids, target.id)
     for source in sources:
         repository.update_question_note(source.id, "", now)
-        repository.update_question_bookmark(source.id, False, now)
 
 
 def _resolve_note_conflict(
