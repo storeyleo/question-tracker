@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QLayout,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
@@ -50,6 +51,9 @@ from question_tracker.ui.layout_spacing import (
 from question_tracker.ui.pdf_pane import ManagedPdfBrowser
 from question_tracker.ui.question_editor import QuestionEditorDialog
 from question_tracker.ui.preferences import UiPreferences
+from question_tracker.application.module_group_service import ModuleGroupService, ModuleGroupError
+from question_tracker.ui.flow_layout import FlowLayout
+from question_tracker.ui.module_organisation import ModuleDropArea, ModuleDragHandle
 
 
 class ModuleCard(QPushButton):
@@ -118,6 +122,7 @@ class HomeScreen(QWidget):
     ) -> None:
         super().__init__(parent)
         self.preferences = preferences or UiPreferences()
+        self.module_groups = ModuleGroupService(service.database)
         self.service = service
         self.paths = paths
         self.open_tracker = open_tracker
@@ -158,18 +163,19 @@ class HomeScreen(QWidget):
         library_path.setWordWrap(True)
 
         self.module_container = QWidget()
-        self.module_card_layout = QHBoxLayout(self.module_container)
+        self.module_card_layout = QVBoxLayout(self.module_container)
+        self.module_card_layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         compact_layout(self.module_card_layout)
         self.module_card_layout.setSpacing(SECTION_SPACING)
-        self.module_card_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.module_card_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.module_scroll = QScrollArea()
         self.module_scroll.setObjectName("moduleCardScroll")
         self.module_scroll.setWidgetResizable(True)
         self.module_scroll.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
         self.module_scroll.setVerticalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
         )
         self.module_scroll.setWidget(self.module_container)
         self.module_scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -378,23 +384,110 @@ class HomeScreen(QWidget):
                 item.widget().hide()
                 item.widget().deleteLater()
         self.module_cards = {}
-        for summary in self.snapshot.modules:
-            card = ModuleCard(summary, self.open_tracker)
-            key = (summary.module.year_name, summary.module.module_name)
-            self.module_cards[key] = card
-            self.module_card_layout.addWidget(card)
-            # Newly added children of a visible container otherwise wait for a
-            # queued show event and are excluded from the size hints below.
-            card.show()
-        # Size the strip to its content, reserving space for horizontal scrolling.
-        self.module_card_layout.invalidate()
-        self.module_container.setMinimumWidth(
-            self.module_card_layout.minimumSize().width()
-        )
-        self.module_scroll.setMinimumHeight(
-            self.module_card_layout.sizeHint().height()
-            + self.module_scroll.horizontalScrollBar().sizeHint().height()
-        )
+        self.module_sections = {}
+        groups, assignments = self.module_groups.snapshot()
+        years = set(self.snapshot.years) | {s.module.year_name for s in self.snapshot.modules}
+        for year in sorted(years, key=str.casefold):
+            year_widget = QWidget()
+            year_widget.setProperty("yearName", year)
+            year_layout = QVBoxLayout(year_widget)
+            compact_layout(year_layout)
+            heading_row = QHBoxLayout()
+            heading = QLabel(year or "Other")
+            heading.setObjectName("moduleYearHeading")
+            font = heading.font()
+            font.setBold(True)
+            heading.setFont(font)
+            heading_row.addWidget(heading)
+            heading_row.addStretch()
+            create = QPushButton("+ New Group")
+            create.clicked.connect(lambda checked=False, y=year: self._create_module_group(y))
+            heading_row.addWidget(create)
+            year_layout.addLayout(heading_row)
+            year_groups = [group for group in groups if group.year_key == year.casefold()]
+            summaries = [s for s in self.snapshot.modules if s.module.year_name == year]
+            for group in [*year_groups, None]:
+                group_id = group.id if group else None
+                area = ModuleDropArea(year, group_id)
+                area.module_dropped.connect(self._assign_module_group)
+                self.module_sections[(year, group_id)] = area
+                section_layout = QVBoxLayout(area)
+                compact_layout(section_layout)
+                row = QHBoxLayout()
+                if group or year_groups:
+                    row.addWidget(QLabel(group.name if group else "Ungrouped"))
+                row.addStretch()
+                if group:
+                    rename = QPushButton("Rename…")
+                    rename.clicked.connect(lambda checked=False, g=group: self._rename_module_group(g))
+                    delete = QPushButton("Delete…")
+                    delete.clicked.connect(lambda checked=False, g=group: self._delete_module_group(g))
+                    row.addWidget(rename)
+                    row.addWidget(delete)
+                section_layout.addLayout(row)
+                cards = QWidget()
+                flow = FlowLayout(cards)
+                for summary in summaries:
+                    key = (summary.module.year_name, summary.module.module_name)
+                    assigned = assignments.get(tuple(part.casefold() for part in key))
+                    if assigned != group_id:
+                        continue
+                    wrapper = QWidget()
+                    wrapper.setMinimumWidth(270)
+                    wrapper.setMaximumWidth(330)
+                    card_layout = QVBoxLayout(wrapper)
+                    compact_layout(card_layout)
+                    card_layout.addWidget(ModuleDragHandle(summary.module))
+                    card = ModuleCard(summary, self.open_tracker)
+                    self.module_cards[key] = card
+                    card_layout.addWidget(card)
+                    flow.addWidget(wrapper)
+                if not flow.count():
+                    section_layout.addWidget(QLabel("Drop modules here" if group or year_groups else "No modules yet"))
+                section_layout.addWidget(cards)
+                year_layout.addWidget(area)
+            self.module_card_layout.addWidget(year_widget)
+            # Include new widgets in height-for-width calculations immediately.
+            year_widget.show()
+        # Scroll vertically as years/groups grow; never force all rows into the
+        # splitter minimum. Keep enough viewport height for a usable card.
+        card_height = max((card.sizeHint().height() for card in self.module_cards.values()), default=80)
+        self.module_scroll.setMinimumHeight(card_height + 60)
+        self.module_container.updateGeometry()
+
+    def _create_module_group(self, year: str) -> None:
+        name, accepted = QInputDialog.getText(self, "New Group", "Group name:")
+        if accepted:
+            self._group_change(lambda: self.module_groups.create(year, name))
+
+    def _rename_module_group(self, group) -> None:
+        name, accepted = QInputDialog.getText(self, "Rename Group", "Group name:", text=group.name)
+        if accepted:
+            self._group_change(lambda: self.module_groups.rename(group.id, name))
+
+    def _delete_module_group(self, group) -> None:
+        if QMessageBox.question(
+            self, "Delete Group", f'Delete "{group.name}"? Modules return to Ungrouped. '
+            "Modules, PDFs and tracking data will not be deleted.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        ) == QMessageBox.StandardButton.Yes:
+            self._group_change(lambda: self.module_groups.delete(group.id))
+
+    def _assign_module_group(self, module, group_id) -> None:
+        # Accept only identities represented by the current Home snapshot.
+        if module not in {summary.module for summary in self.snapshot.modules}:
+            return
+        self._group_change(lambda: self.module_groups.assign(module, group_id))
+
+    def _group_change(self, operation) -> None:
+        try:
+            operation()
+        except ModuleGroupError as error:
+            QMessageBox.warning(self, "Module organisation", str(error))
+            return
+        # Complete drag/drop or button callbacks before retiring their widgets.
+        QTimer.singleShot(0, self, self._populate_module_cards)
 
     def _populate_needs_setup(self) -> None:
         self.needs_setup_tree.clear()

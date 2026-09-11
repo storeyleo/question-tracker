@@ -282,6 +282,30 @@ find questions requiring reattempts.
 
 The home screen contains module cards.
 
+Modules are separated by their structured managed-library academic year, with
+an Other heading for an empty year. Cards wrap into additional rows as the
+available width decreases. The module panel scrolls vertically and retains its
+persisted splitter sizes and a usable minimum height.
+
+Each year can have optional organisational groups (for example Physics or
+Maths). New Group, Rename and Delete actions manage them. Group names are
+trimmed, non-empty and unique within a year ignoring case. Groups and modules
+are displayed alphabetically; there is no manual ordering in this milestone.
+
+Use a module's “Drag to group” handle to move it between groups or back to
+Ungrouped in the same year. Cross-year drops are rejected. Dragging is separate
+from opening a module, and is also available for modules awaiting setup.
+
+These groups are persistent organisation metadata, not physical library
+folders. Migration 005 adds UUID-backed module_groups and a separate assignment
+table keyed by the existing case-folded year/module identity. Renaming keeps
+the group UUID; deleting a group removes only its assignments, returning modules
+to Ungrouped. No PDFs, module folders, question sets or tracking records move or
+change. Scanning/importing files leaves assignments intact. The Managed Library
+tree continues to represent the physical hierarchy and keeps its existing
+session expansion behaviour. An external module/year folder rename changes
+the existing identity; group assignments are not automatically inferred for it.
+
 Each module shows counts for problem sheets and past papers, including
 completion information.
 
