@@ -10,6 +10,18 @@ from question_tracker.application.library_service import LibraryService
 from question_tracker.persistence.database import Database
 
 
+@pytest.fixture(autouse=True)
+def isolated_ui_preferences(request, monkeypatch, tmp_path):
+    if "qtbot" in request.fixturenames:
+        from PySide6.QtCore import QSettings
+        from question_tracker.ui import preferences
+
+        monkeypatch.setattr(
+            preferences, "default_settings",
+            lambda: QSettings(str(tmp_path / "ui.ini"), QSettings.Format.IniFormat),
+        )
+
+
 def _fixture_pdf_bytes(page_texts: tuple[str, ...]) -> bytes:
     """Build a tiny standards-compliant PDF without adding a test dependency."""
     page_count = len(page_texts)

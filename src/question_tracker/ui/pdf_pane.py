@@ -58,10 +58,12 @@ class ManagedPdfBrowser(QTreeWidget):
     FOLDER_PATH_ROLE = FILE_ID_ROLE + 1
 
     def __init__(
-        self, library_service: LibraryService, parent: QWidget | None = None
+        self, library_service: LibraryService, parent: QWidget | None = None,
+        *, expanded_roots: set[tuple[str, ...]] | None = None,
     ) -> None:
         super().__init__(parent)
         self.library_service = library_service
+        self.expanded_roots = expanded_roots
         self._folder_items: dict[tuple[str, ...], QTreeWidgetItem] = {}
         self._file_items: dict[str, QTreeWidgetItem] = {}
         self._path_items: dict[tuple[str, ...], QTreeWidgetItem] = {}
@@ -168,6 +170,11 @@ class ManagedPdfBrowser(QTreeWidget):
                     highlighted_parent.setExpanded(True)
                     highlighted_parent = highlighted_parent.parent()
 
+        for path in tuple(self.expanded_roots or ()):
+            item = self._folder_items.get(path)
+            if item is not None:
+                self.expand_descendants(item)
+
         for path in expanded_paths:
             item = self._folder_items.get(path)
             if item is not None:
@@ -225,6 +232,9 @@ class ManagedPdfBrowser(QTreeWidget):
 
     def _item_clicked(self, item: QTreeWidgetItem, column: int) -> None:
         if column == 1 and item.data(0, self.FILE_ID_ROLE) is None:
+            path = _item_relative_path(item, self.FOLDER_PATH_ROLE)
+            if path is not None and self.expanded_roots is not None:
+                self.expanded_roots.add(path)
             self.expand_descendants(item)
 
 

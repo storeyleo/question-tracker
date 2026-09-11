@@ -5,7 +5,7 @@ from collections.abc import Sequence
 
 from pathlib import Path
 
-from PySide6.QtCore import QCoreApplication, QEvent
+from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtGui import QUndoStack
 from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBox, QPushButton
 
@@ -19,6 +19,8 @@ from question_tracker.ui.home import HomeScreen
 from question_tracker.ui.review import ReviewScreen
 from question_tracker.ui.marking import MarkingWorkspace
 from question_tracker.ui.tracker import TrackerScreen
+from question_tracker.ui.preferences import UiPreferences
+from question_tracker.ui.navigation import Destination, NavigationHistory
 
 
 class MainWindow(QMainWindow):
@@ -29,14 +31,26 @@ class MainWindow(QMainWindow):
         paths: ApplicationPaths,
         tracking_service: TrackingService,
         library_service: LibraryService | None = None,
+        *, preferences: UiPreferences | None = None,
     ) -> None:
         super().__init__()
+        self.preferences = preferences or UiPreferences()
+        self.expanded_home_roots: set[tuple[str, ...]] = set()
+        self.history = NavigationHistory()
+        self._restoring_history = False
         self.paths = paths
         self.tracking_service = tracking_service
         self.library_service = library_service or LibraryService(
             tracking_service.database, paths.managed_library_root
         )
         self.undo_stack = QUndoStack(self)
+        # QObject emits destroyed before deleting its children. The stack was
+        # created before the screens and can therefore be deleted first; its
+        # destructor clears commands and emits indexChanged. Do not refresh
+        # still-alive screen children from those teardown notifications.
+        self.destroyed.connect(
+            lambda _=None, stack=self.undo_stack: stack.blockSignals(True)
+        )
         self.setWindowTitle("Question Tracker")
         self.resize(1200, 750)
         self.backups = BackupService(paths)
@@ -48,6 +62,55 @@ class MainWindow(QMainWindow):
         self.export_bundle_action.triggered.connect(lambda: self._export_data(True))
         self.import_bundle_action.triggered.connect(self._import_bundle)
         self.show_home()
+
+    def _capture_destination(self) -> None:
+        current = self.history.current
+        widget = self.centralWidget()
+        if current is None:
+            return
+        if isinstance(widget, TrackerScreen):
+            current = Destination("tracker", (widget.current_question_set_id, widget.selected_question_id), current.on_back)
+        elif isinstance(widget, ReviewScreen):
+            current = Destination("review", (widget.module_combo.currentData(), widget.filter_combo.currentData()))
+        elif isinstance(widget, MarkingWorkspace):
+            # Preserve file-only destinations, but also capture an explicitly
+            # cleared tracking selection instead of retaining a stale set ID.
+            if widget.active_question_set_id is not None or current.screen != "file_marking":
+                current = Destination("marking", (widget.active_question_set_id, widget.selected_question_id), current.on_back)
+        self.history.replace_current(current)
+
+    def _visit(self, destination: Destination) -> None:
+        # Explicit Home/Back-to-Review actions remain ordinary destinations.
+        # Only thumb-button navigation moves the history cursor directly.
+        if not self._restoring_history:
+            self._capture_destination()
+            self.history.visit(destination)
+
+    def navigate(self, offset: int) -> None:
+        self._capture_destination()
+        destination = self.history.move(offset)
+        if destination is None:
+            return
+        self._restoring_history = True
+        try:
+            opener = {
+                "home": self.show_home, "review": self.show_review,
+                "tracker": self.show_tracker, "marking": self.show_marking,
+                "file_marking": self.show_file_in_marking,
+            }[destination.screen]
+            kwargs = {"on_back": destination.on_back} if destination.screen in ("tracker", "marking") else {}
+            opener(*destination.args, **kwargs)
+        finally:
+            self._restoring_history = False
+
+    def mouseReleaseEvent(self, event) -> None:
+        # Qt propagates ignored mouse events up to the window. A child that
+        # accepts the event keeps it, so embedded controls get first refusal.
+        if event.button() in (Qt.MouseButton.BackButton, Qt.MouseButton.ForwardButton):
+            self.navigate(-1 if event.button() == Qt.MouseButton.BackButton else 1)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def _export_data(self, portable: bool) -> None:
         title = "Export Portable Bundle" if portable else "Export Database"
@@ -102,9 +165,12 @@ class MainWindow(QMainWindow):
         database = Database(self.paths.database_path)
         self.tracking_service = TrackingService(database)
         self.library_service = LibraryService(database, self.paths.managed_library_root)
+        self.history = NavigationHistory()
+        self.expanded_home_roots.clear()
         self.show_home()
 
     def show_home(self) -> None:
+        self._visit(Destination("home"))
         self.setCentralWidget(
             HomeScreen(
                 self.tracking_service,
@@ -115,10 +181,13 @@ class MainWindow(QMainWindow):
                 open_marking=self.show_marking,
                 open_file_marking=self.show_file_in_marking,
                 library_service=self.library_service,
+                preferences=self.preferences,
+                expanded_roots=self.expanded_home_roots,
             )
         )
 
     def show_review(self, module=None, filter=ReviewFilter.REATTEMPT) -> None:
+        self._visit(Destination("review", (module, filter)))
         self.setCentralWidget(ReviewScreen(
             ReviewService(self.tracking_service.database), on_back=self.show_home,
             initial_module=module, initial_filter=filter, parent=self,
@@ -133,6 +202,7 @@ class MainWindow(QMainWindow):
         ))
 
     def show_tracker(self, question_set_id: str, selected_question_id: str | None = None, *, on_back=None) -> None:
+        self._visit(Destination("tracker", (question_set_id, selected_question_id), on_back))
         self.setCentralWidget(
             TrackerScreen(
                 self.tracking_service,
@@ -141,6 +211,7 @@ class MainWindow(QMainWindow):
                 on_back=on_back or self.show_home,
                 on_open_marking=self.show_marking,
                 initial_question_set_id=question_set_id,
+                preferences=self.preferences,
                 parent=self,
             )
         )
@@ -150,6 +221,7 @@ class MainWindow(QMainWindow):
             self.centralWidget().findChild(QPushButton, "backToHomeButton").setText("Back to Review")
 
     def show_file_in_marking(self, file_id: str) -> None:
+        self._visit(Destination("file_marking", (file_id,)))
         self.setCentralWidget(
             MarkingWorkspace(
                 self.tracking_service,
@@ -167,6 +239,7 @@ class MainWindow(QMainWindow):
         selected_question_id: str | None = None,
         *, on_back=None,
     ) -> None:
+        self._visit(Destination("marking", (question_set_id, selected_question_id), on_back))
         self.setCentralWidget(
             MarkingWorkspace(
                 self.tracking_service,

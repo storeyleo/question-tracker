@@ -603,6 +603,15 @@ class MarkingWorkspace(QWidget):
         elif initial_file_id is not None:
             self._load_file_context(initial_file_id)
 
+    @property
+    def active_question_set_id(self) -> str | None:
+        """Current tracking context exposed to the application navigator."""
+        return self.compact_tracker.active_question_set_id
+
+    @property
+    def selected_question_id(self) -> str | None:
+        return self.compact_tracker.selected_question_id
+
     def _load_question_set_context(
         self, question_set_id: str, selected_question_id: str | None
     ) -> None:

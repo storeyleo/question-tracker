@@ -445,3 +445,27 @@ The first build should prioritise:
 
 Advanced visual polish and optional features should be added after the core
 workflow is reliable.
+
+# Persistent UI state and mouse navigation
+
+Machine-local UI preferences use QSettings under versioned `ui/v1/` keys,
+separately from the database and tracker appearance values. Tracker zoom is
+global, defaults to 60%, and restores within the supported 50–160% range.
+Zoom is saved when the user changes it.
+
+Home's module strip, library/right-hand panels, and Needs Setup/all-sets panels
+use draggable splitters. Their states are saved when handles move and restored
+on reopening. Invalid states fall back to defaults; panels cannot be collapsed,
+and the module strip keeps enough height for its buttons.
+
+Home's per-folder Expand all action remains active for that branch during the
+current run, including newly discovered descendants and returns to Home. This
+intent is not saved across launches.
+
+The main window maintains back/forward screen history through its existing
+screen-opening methods. Unconsumed Back/Forward mouse-button releases navigate
+that history; embedded widgets accepting these events keep control. Ordinary
+mouse buttons are unchanged. New destinations discard forward history; bundle
+replacement resets history. History records tracker question selection and
+Review module/filter state when leaving a screen, rather than retaining old
+widgets. It does not record every internal pane, scroll, or tree interaction.

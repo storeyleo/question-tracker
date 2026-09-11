@@ -49,6 +49,7 @@ from question_tracker.ui.layout_spacing import (
 )
 from question_tracker.ui.pdf_pane import ManagedPdfBrowser
 from question_tracker.ui.question_editor import QuestionEditorDialog
+from question_tracker.ui.preferences import UiPreferences
 
 
 class ModuleCard(QPushButton):
@@ -112,8 +113,11 @@ class HomeScreen(QWidget):
         open_marking: Callable[[str | None], None] | None = None,
         open_file_marking: Callable[[str], None] | None = None,
         library_service: LibraryService | None = None,
+        preferences: UiPreferences | None = None,
+        expanded_roots: set[tuple[str, ...]] | None = None,
     ) -> None:
         super().__init__(parent)
+        self.preferences = preferences or UiPreferences()
         self.service = service
         self.paths = paths
         self.open_tracker = open_tracker
@@ -170,7 +174,10 @@ class HomeScreen(QWidget):
         self.module_scroll.setWidget(self.module_container)
         self.module_scroll.setFrameShape(QFrame.Shape.NoFrame)
 
-        self.library_browser = ManagedPdfBrowser(self.library_service)
+        self.library_browser = ManagedPdfBrowser(
+            self.library_service,
+            expanded_roots=expanded_roots if expanded_roots is not None else set(),
+        )
         self.library_browser.setObjectName("homeLibraryBrowser")
         self.library_browser.currentItemChanged.connect(
             self._browser_selection_changed
@@ -225,7 +232,6 @@ class HomeScreen(QWidget):
         # Keep the existing all-set selector as a compact navigation convenience.
         self.question_set_list = QListWidget()
         self.question_set_list.setObjectName("questionSetList")
-        self.question_set_list.setMaximumHeight(115)
         self.question_set_list.itemDoubleClicked.connect(self._open_item)
         self.open_button = QPushButton("Open selected")
         self.open_button.setObjectName("openQuestionSetButton")
@@ -244,11 +250,10 @@ class HomeScreen(QWidget):
         all_sets_actions.addStretch()
         all_sets_layout.addLayout(all_sets_actions)
 
-        right_column = QWidget()
-        right_layout = QVBoxLayout(right_column)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.addWidget(needs_group, 2)
-        right_layout.addWidget(all_sets_group, 1)
+        right_column = QSplitter(Qt.Orientation.Vertical)
+        right_column.setObjectName('homeRightSplitter')
+        right_column.addWidget(needs_group)
+        right_column.addWidget(all_sets_group)
         content_splitter = QSplitter(Qt.Orientation.Horizontal)
         content_splitter.setObjectName("homeContentSplitter")
         content_splitter.addWidget(browser_group)
@@ -300,8 +305,13 @@ class HomeScreen(QWidget):
         heading_font.setBold(True)
         modules_heading.setFont(heading_font)
         layout.addWidget(modules_heading)
-        layout.addWidget(self.module_scroll)
-        layout.addWidget(content_splitter, 1)
+        panels = QSplitter(Qt.Orientation.Vertical)
+        panels.setObjectName('homePanelsSplitter')
+        panels.addWidget(self.module_scroll)
+        panels.addWidget(content_splitter)
+        panels.setStretchFactor(0, 0)
+        panels.setStretchFactor(1, 1)
+        layout.addWidget(panels, 1)
         layout.addWidget(import_group)
 
         for group in (browser_group, needs_group, all_sets_group, import_group):
@@ -309,8 +319,6 @@ class HomeScreen(QWidget):
             compact_layout(group.layout(), margin=PAGE_MARGIN)
         for row in (header, browser_actions, all_sets_actions, import_actions):
             compact_layout(row)
-        compact_layout(right_layout)
-        right_layout.setSpacing(SECTION_SPACING)
         compact_layout(layout, margin=PAGE_MARGIN)
         layout.setSpacing(SECTION_SPACING)
         for tree in (self.library_browser, self.needs_setup_tree):
@@ -319,6 +327,11 @@ class HomeScreen(QWidget):
         self.question_set_list.setFrameShape(QFrame.Shape.NoFrame)
 
         self.refresh()
+        self.preferences.bind_splitter(content_splitter, 'home/content', (700, 400))
+        self.preferences.bind_splitter(right_column, 'home/right', (350, 170))
+        self.preferences.bind_splitter(
+            panels, 'home/panels', (self.module_scroll.minimumHeight(), 520)
+        )
 
     def refresh(self) -> None:
         selected_id = self._selected_question_set_id()
@@ -362,6 +375,7 @@ class HomeScreen(QWidget):
         while self.module_card_layout.count():
             item = self.module_card_layout.takeAt(0)
             if item.widget() is not None:
+                item.widget().hide()
                 item.widget().deleteLater()
         self.module_cards = {}
         for summary in self.snapshot.modules:
@@ -369,12 +383,15 @@ class HomeScreen(QWidget):
             key = (summary.module.year_name, summary.module.module_name)
             self.module_cards[key] = card
             self.module_card_layout.addWidget(card)
+            # Newly added children of a visible container otherwise wait for a
+            # queued show event and are excluded from the size hints below.
+            card.show()
         # Size the strip to its content, reserving space for horizontal scrolling.
         self.module_card_layout.invalidate()
         self.module_container.setMinimumWidth(
             self.module_card_layout.minimumSize().width()
         )
-        self.module_scroll.setFixedHeight(
+        self.module_scroll.setMinimumHeight(
             self.module_card_layout.sizeHint().height()
             + self.module_scroll.horizontalScrollBar().sizeHint().height()
         )

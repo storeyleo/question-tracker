@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
@@ -163,6 +163,49 @@ def test_import_dialog_creates_year_and_module_without_leaving_workflow(
     assert dialog.module_combo.currentText() == "Functional Analysis"
     module = library_service.root / "Masters" / "Functional Analysis"
     assert {path.name for path in module.iterdir()} == set(STANDARD_CATEGORY_FOLDERS)
+
+
+@pytest.mark.parametrize("action", ("refresh", "close_setup"))
+def test_visible_home_refresh_keeps_module_cards_accessible(
+    qtbot, monkeypatch, tracking_service, library_service, application_paths,
+    pdf_factory, action,
+):
+    _create_module(library_service)
+    main = _import_main(library_service, application_paths, pdf_factory, "Ready.pdf")
+    question_set = _question_set_for_main(library_service, main.id)
+    tracking_service.create_question(question_set.id, "1")
+    tracking_service.finish_question_set_setup(question_set.id)
+    setup = _import_main(library_service, application_paths, pdf_factory, "Setup.pdf")
+    opened = []
+    home = HomeScreen(
+        tracking_service, application_paths, open_tracker=opened.append,
+        library_service=library_service,
+    )
+    qtbot.addWidget(home)
+    home.resize(1200, 750)
+    home.show()
+    qtbot.waitExposed(home)
+    original_exec = QuestionEditorDialog.exec
+    def close_editor(dialog):
+        QTimer.singleShot(0, dialog.reject)
+        return original_exec(dialog)
+    monkeypatch.setattr(QuestionEditorDialog, "exec", close_editor)
+
+    for _ in range(3):
+        if action == "close_setup":
+            home.library_browser.setCurrentItem(home.library_browser.file_item(setup.id))
+            home.quick_setup_button.click()
+        else:
+            home.refresh_button.click()
+        card = home.module_cards[("Year 2", "Analysis")]
+        qtbot.waitUntil(lambda: card.isVisible() and home.module_scroll.viewport().height() >= card.sizeHint().height())
+        # The whole button, not just a sliver, must be reachable in the viewport.
+        home.module_scroll.ensureWidgetVisible(card)
+        assert home.module_scroll.viewport().rect().contains(
+            card.mapTo(home.module_scroll.viewport(), card.rect().center())
+        )
+        qtbot.mouseClick(card, Qt.MouseButton.LeftButton)
+    assert opened == [question_set.id] * 3
 
 
 def test_home_module_cards_show_multiple_modules_and_open_exact_tracker(

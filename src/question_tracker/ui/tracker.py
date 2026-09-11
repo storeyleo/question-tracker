@@ -65,6 +65,9 @@ from question_tracker.domain.tracking import (
 from question_tracker.ui.colours import contrasting_text_colour
 from question_tracker.ui.tracker_appearance_dialog import TrackerAppearanceDialog
 from question_tracker.ui.question_editor import QuestionEditorDialog
+from question_tracker.ui.preferences import (
+    UiPreferences, MIN_ZOOM_PERCENT, MAX_ZOOM_PERCENT, DEFAULT_ZOOM_PERCENT,
+)
 from question_tracker.ui.tracker_commands import (
     AddAttemptCommand,
     DeleteAttemptCommand,
@@ -96,10 +99,7 @@ STATUS_SHORTCUTS = {
     "4": AttemptStatus.NO_START,
 }
 
-MIN_ZOOM_PERCENT = 50
-MAX_ZOOM_PERCENT = 160
 ZOOM_STEP = 10
-DEFAULT_ZOOM_PERCENT = 60
 
 
 @dataclass(frozen=True, slots=True)
@@ -717,6 +717,7 @@ class TrackerScreen(QWidget):
         on_back: Callable[[], None] | None = None,
         on_open_marking: Callable[[str, str | None], None] | None = None,
         initial_question_set_id: str | None = None,
+        preferences: UiPreferences | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -734,7 +735,8 @@ class TrackerScreen(QWidget):
         self.question_set_by_question: dict[str, str] = {}
         self.status_buttons: dict[AttemptStatus, QPushButton] = {}
         self._shortcuts: list[QShortcut] = []
-        self.zoom_percent = DEFAULT_ZOOM_PERCENT
+        self.preferences = preferences or UiPreferences()
+        self.zoom_percent = self.preferences.tracker_zoom()
         self.appearance = load_tracker_appearance()
         self._scroll_revision = 0
         self._attempt_history_open = False
@@ -851,6 +853,8 @@ class TrackerScreen(QWidget):
         self.zoom_in_button.setObjectName("zoomInButton")
         self.zoom_in_button.setToolTip("Zoom in")
         self.zoom_in_button.clicked.connect(lambda: self.change_zoom(ZOOM_STEP))
+        self.zoom_out_button.setEnabled(self.zoom_percent > MIN_ZOOM_PERCENT)
+        self.zoom_in_button.setEnabled(self.zoom_percent < MAX_ZOOM_PERCENT)
         tracker_header = QHBoxLayout()
         tracker_header.addWidget(self.title_label)
         tracker_header.addStretch()
@@ -1007,6 +1011,7 @@ class TrackerScreen(QWidget):
         if new_zoom == self.zoom_percent:
             return
         self.zoom_percent = new_zoom
+        self.preferences.save_tracker_zoom(new_zoom)
         self.zoom_label.setText(f"{new_zoom}%")
         self.zoom_out_button.setEnabled(new_zoom > MIN_ZOOM_PERCENT)
         self.zoom_in_button.setEnabled(new_zoom < MAX_ZOOM_PERCENT)
